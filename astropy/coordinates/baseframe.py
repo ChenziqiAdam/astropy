@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, NamedTuple, Union
 
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy import units as u
 from astropy.table import QTable
 from astropy.units import Unit
@@ -45,6 +46,7 @@ from .representation import (
     BaseRepresentationOrDifferential,
 )
 from .transformations import (
+    CompositeTransform,
     DynamicMatrixTransform,
     StaticMatrixTransform,
     TransformGraph,
@@ -1490,7 +1492,47 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
                 return new_frame.realize_frame(self.data)
             msg = "Cannot transform from {0} to {1}"
             raise ConvertError(msg.format(self.__class__, new_frame.__class__))
-        return trans(self, new_frame)
+        result = trans(self, new_frame)
+
+        if (
+            _scientific_checkers.enabled()
+            and new_frame.__class__ is self.__class__
+            and self.is_equivalent_frame(new_frame)
+            and isinstance(trans, CompositeTransform)
+            and all(
+                isinstance(edge, (StaticMatrixTransform, DynamicMatrixTransform))
+                for edge in trans.transforms
+            )
+        ):
+            try:
+                orig = self.represent_as(r.UnitSphericalRepresentation)
+                recon = result.represent_as(r.UnitSphericalRepresentation)
+                _scientific_checkers.check_frame_roundtrip_angular(
+                    float(u.Quantity(orig.lon).to_value(u.rad)),
+                    float(u.Quantity(orig.lat).to_value(u.rad)),
+                    float(u.Quantity(recon.lon).to_value(u.rad)),
+                    float(u.Quantity(recon.lat).to_value(u.rad)),
+                )
+                if self.data is not None and not isinstance(
+                    self.data, r.UnitSphericalRepresentation
+                ):
+                    orig_cart = self.data.without_differentials().represent_as(
+                        r.CartesianRepresentation
+                    )
+                    recon_cart = result.data.without_differentials().represent_as(
+                        r.CartesianRepresentation
+                    )
+                    unit = orig_cart.x.unit
+                    orig_xyz = orig_cart.xyz.to_value(unit)
+                    recon_xyz = recon_cart.xyz.to_value(unit)
+                    _scientific_checkers.check_frame_roundtrip_3d(
+                        tuple(float(x) for x in orig_xyz),
+                        tuple(float(x) for x in recon_xyz),
+                    )
+            except Exception:
+                pass
+
+        return result
 
     def is_transformable_to(self, new_frame):
         """
@@ -2062,12 +2104,24 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
         .. [1] https://en.wikipedia.org/wiki/Great-circle_distance
 
         """
-        return Angle(
-            angular_separation(
-                *self._prepare_unit_sphere_coords(other, origin_mismatch)
-            ),
-            unit=u.degree,
+        lon1, lat1, lon2, lat2 = self._prepare_unit_sphere_coords(
+            other, origin_mismatch
         )
+        sep_rad = angular_separation(lon1, lat1, lon2, lat2)
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_triangle_inequality(
+                    float(u.Quantity(lon1).to_value(u.rad)),
+                    float(u.Quantity(lat1).to_value(u.rad)),
+                    float(u.Quantity(lon2).to_value(u.rad)),
+                    float(u.Quantity(lat2).to_value(u.rad)),
+                    float(u.Quantity(sep_rad).to_value(u.rad)),
+                )
+            except Exception:
+                pass
+
+        return Angle(sep_rad, unit=u.degree)
 
     def separation_3d(self, other):
         """

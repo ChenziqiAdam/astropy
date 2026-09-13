@@ -8,6 +8,7 @@ from typing import Union
 import erfa
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy import units as u
 from astropy.constants import c as speed_of_light
 from astropy.time import Time
@@ -1132,6 +1133,19 @@ class SkyCoord(MaskableShapedLikeNDArray):
         newlon, newlat = offset_by(
             lon=slon, lat=slat, posang=position_angle, distance=separation
         )
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_offset_roundtrip(
+                    float(u.Quantity(slon).to_value(u.rad)),
+                    float(u.Quantity(slat).to_value(u.rad)),
+                    float(u.Quantity(position_angle).to_value(u.rad)),
+                    float(u.Quantity(separation).to_value(u.rad)),
+                    float(u.Quantity(newlon).to_value(u.rad)),
+                    float(u.Quantity(newlat).to_value(u.rad)),
+                )
+            except Exception:
+                pass
 
         return SkyCoord(newlon, newlat, frame=self.frame)
 
