@@ -650,6 +650,73 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
     trigger_if(abs((ratio - 1) - predicted) > _K_TOL, "AP-UNITS-004")
 
 
+# --- Candidate L: separability matrix soundness vs numerical Jacobian -----
+#
+# LAW_CANDIDATES.md Candidate L. Precondition: any compound model whose
+# separability_matrix computes successfully, at any evaluation point where
+# the model itself evaluates successfully. Alarm: for any (i, j) where the
+# matrix claims output i cannot depend on input j, the numerical (central-
+# difference) partial derivative of output i w.r.t. input j must be exactly
+# zero (to a defensive floor, not a fit -- a 300-random-compound-model
+# sweep found exactly 0.0 in every case, since these are simple closed-form
+# evaluations with no accumulation path). Only the False-entry direction is
+# checked -- True entries are a deliberately conservative upper bound and
+# are NOT claimed to imply nonzero dependence (see LAW_CANDIDATES.md for
+# why the reverse direction would be false, e.g. Scale(0)).
+
+_L_TOL = 1e-8
+_L_EPS = 1e-6
+_L_TEST_POINTS = ((0.7, -1.3, 2.1, -0.4),)
+
+
+@_guard("separability_soundness")
+def check_separability_soundness(transform, matrix):
+    """AP-MODEL-001: wherever separability_matrix claims an output cannot
+    depend on an input, a numerical central-difference derivative at a
+    representative evaluation point must be exactly zero (to a defensive
+    floor). See LAW_CANDIDATES.md Candidate L for why only this direction
+    (False-entry soundness) is a valid law, not the reverse.
+
+    ``transform`` is the model separability_matrix was just computed for;
+    ``matrix`` is the boolean array it returned.
+    """
+    import numpy as np
+
+    n_in = transform.n_inputs
+    n_out = transform.n_outputs
+    if matrix.shape != (n_out, n_in):
+        return
+    if not np.any(~matrix):
+        return  # nothing to check -- every entry claims possible dependence
+
+    x0 = [_L_TEST_POINTS[0][k % len(_L_TEST_POINTS[0])] for k in range(n_in)]
+
+    try:
+        y0 = np.atleast_1d(transform(*x0))
+    except Exception:
+        return
+    if y0.shape[-1] != n_out or not np.all(np.isfinite(y0)):
+        return
+
+    for j in range(n_in):
+        xp = list(x0)
+        xm = list(x0)
+        xp[j] = x0[j] + _L_EPS
+        xm[j] = x0[j] - _L_EPS
+        try:
+            yp = np.atleast_1d(transform(*xp))
+            ym = np.atleast_1d(transform(*xm))
+        except Exception:
+            continue
+        if not (np.all(np.isfinite(yp)) and np.all(np.isfinite(ym))):
+            continue
+
+        deriv = np.abs(yp - ym) / (2 * _L_EPS)
+        for i in range(n_out):
+            if not matrix[i, j]:
+                trigger_if(deriv[i] > _L_TOL, "AP-MODEL-001")
+
+
 # --- Candidate C: spherical triangle inequality -----------------------------
 #
 # LAW_CANDIDATES.md Candidate C. Precondition: none (a metric's triangle

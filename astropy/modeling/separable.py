@@ -17,6 +17,8 @@ returns an array of shape (``n_outputs``, ``n_inputs``).
 
 import numpy as np
 
+from astropy import _scientific_checkers
+
 from .core import CompoundModel, Model, ModelDefinitionError
 from .mappings import Mapping
 
@@ -94,10 +96,18 @@ def separability_matrix(transform):
 
     """
     if transform.n_inputs == 1 and transform.n_outputs > 1:
-        return np.ones((transform.n_outputs, transform.n_inputs), dtype=np.bool_)
-    separable_matrix = _separable(transform)
-    separable_matrix = np.where(separable_matrix != 0, True, False)
-    return separable_matrix
+        result = np.ones((transform.n_outputs, transform.n_inputs), dtype=np.bool_)
+    else:
+        separable_matrix = _separable(transform)
+        result = np.where(separable_matrix != 0, True, False)
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_separability_soundness(transform, result)
+        except Exception:
+            pass
+
+    return result
 
 
 def _compute_n_outputs(left, right):
