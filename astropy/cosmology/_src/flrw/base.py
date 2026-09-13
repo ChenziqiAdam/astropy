@@ -16,6 +16,7 @@ from numpy.typing import ArrayLike, NDArray
 
 import astropy.constants as const
 import astropy.units as u
+from astropy import _scientific_checkers
 from astropy.cosmology._src.typing import CosmoMeta, FArray
 from astropy.utils.decorators import deprecated, lazyproperty
 from astropy.utils.exceptions import AstropyUserWarning
@@ -432,10 +433,18 @@ class FLRW(
         )
         zp1 = aszarr(z) + 1.0  # (converts z [unit] -> z [dimensionless])
 
-        return (
+        result = (
             zp1**2 * ((Or * zp1 + self.Om0) * zp1 + self.Ok0)
             + self.Ode0 * self.de_density_scale(z)
         ) ** (-0.5)
+
+        if _scientific_checkers.enabled() and np.ndim(zp1) == 0:
+            try:
+                _scientific_checkers.check_inv_efunc_cross_implementation(self, z)
+            except Exception:
+                pass
+
+        return result
 
     # ---------------------------------------------------------------
     # properties
@@ -675,7 +684,17 @@ class FLRW(
         --------
         z_at_value : Find the redshift corresponding to a lookback time.
         """
-        return self._lookback_time(z)
+        result = self._lookback_time(z)
+
+        if _scientific_checkers.enabled() and np.ndim(aszarr(z)) == 0:
+            try:
+                _scientific_checkers.check_age_lookback_complementarity(
+                    self, z, float(result.to_value(u.Gyr))
+                )
+            except Exception:
+                pass
+
+        return result
 
     def _lookback_time(self, z: u.Quantity | ArrayLike, /) -> u.Quantity:
         """Lookback time in Gyr to redshift ``z``.

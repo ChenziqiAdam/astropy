@@ -717,6 +717,97 @@ def check_separability_soundness(transform, matrix):
                 trigger_if(deriv[i] > _L_TOL, "AP-MODEL-001")
 
 
+# --- Candidate L: Cython/Python cross-implementation agreement of inv_efunc
+#
+# LAW_CANDIDATES.md Candidate L. Precondition: scalar z >= 0 (this checker's
+# implementation restriction -- _inv_efunc_scalar only accepts scalars;
+# array-valued inv_efunc(z) calls are out of scope, same discipline as the
+# scalar-only restriction on AP-TIME-001/002). Tolerance 20*eps64, derived
+# from a 14,000-trial sweep (worst ratio 1.58*eps64) plus a 6,000-trial
+# massive-neutrino-path sweep (worst ratio 1.45*eps64).
+
+_L_TOL_C = 20.0
+
+
+@_guard("inv_efunc_cross_implementation")
+def check_inv_efunc_cross_implementation(cosmo, z):
+    """AP-COSMO-001: inv_efunc (public, vectorized, pure-Python) and
+    _inv_efunc_scalar (the compiled Cython fast-path used internally by
+    every quad()-based distance/time integral) are two independently
+    written implementations of the same E(z)^-1 formula; they must agree
+    (LAW_CANDIDATES.md Candidate L). ``cosmo`` is the FLRW instance;
+    ``z`` is a scalar redshift already used in a production call.
+    """
+    import math
+
+    try:
+        z_scalar = float(z)
+    except (TypeError, ValueError):
+        return
+    if z_scalar < 0:
+        return
+
+    py_val = float(cosmo.inv_efunc(z_scalar))
+    if not math.isfinite(py_val) or py_val == 0:
+        return
+
+    cy_val = float(cosmo._inv_efunc_scalar(z_scalar, *cosmo._inv_efunc_scalar_args))
+    if not math.isfinite(cy_val):
+        return
+
+    relerr = abs(py_val - cy_val) / abs(py_val)
+    trigger_if(relerr > _L_TOL_C * _EPS64, "AP-COSMO-001")
+
+
+# --- Candidate M: age/lookback-time complementarity ------------------------
+#
+# LAW_CANDIDATES.md Candidate M. Precondition: any FLRW instance and z >= 0
+# where age(0), age(z), lookback_time(z) all converge. Tolerance derived
+# from quad()'s own default epsabs/epsrel (1.49e-8), not eps64 -- an
+# initial eps64-based guess was wrong by ~6 orders of magnitude (worst
+# ratio 5.76e6*eps64), corrected after checking against quad's documented
+# tolerance (worst ratio 0.256 over a 5,000-trial sweep including wCDM and
+# z up to ~1200).
+
+_M_QUAD_TOL = 1.49e-8
+_M_TOL_C = 3.0
+
+
+@_guard("age_lookback_time_complementarity")
+def check_age_lookback_complementarity(cosmo, z, lookback_z_val):
+    """AP-COSMO-002: age(0) - age(z) == lookback_time(z), a consequence of
+    both being scipy.integrate.quad on the same integrand over
+    complementary bounds (LAW_CANDIDATES.md Candidate M -- a weaker
+    cross-check than AP-COSMO-001 since the integrand is shared; see the
+    document's manual-review note on what this law does and does not
+    cover).
+
+    ``cosmo`` is the FLRW instance; ``z`` is the scalar redshift a
+    production lookback_time(z) call just used; ``lookback_z_val`` is the
+    numeric value (Gyr) it returned. Re-calls the public age() at 0 and at
+    z to get the independent complementary quantities.
+    """
+    import math
+
+    try:
+        z_scalar = float(z)
+    except (TypeError, ValueError):
+        return
+    if z_scalar < 0:
+        return
+
+    age0_val = float(cosmo.age(0.0).to_value("Gyr"))
+    age_z_val = float(cosmo.age(z_scalar).to_value("Gyr"))
+    if not all(math.isfinite(v) for v in (age0_val, age_z_val, lookback_z_val)):
+        return
+
+    hubble_time_gyr = float(cosmo.hubble_time.to_value("Gyr"))
+
+    err = abs((age0_val - age_z_val) - lookback_z_val)
+    tol = _M_TOL_C * _M_QUAD_TOL * abs(hubble_time_gyr)
+    trigger_if(err > tol, "AP-COSMO-002")
+
+
 # --- Candidate C: spherical triangle inequality -----------------------------
 #
 # LAW_CANDIDATES.md Candidate C. Precondition: none (a metric's triangle
