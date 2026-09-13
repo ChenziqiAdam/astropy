@@ -311,6 +311,345 @@ def check_time_arithmetic_inverse(t1, t2, delta):
     trigger_if(err_sec > _E_TOL_SEC, "AP-TIME-002")
 
 
+# --- Candidate F: WCS pixel/world round-trip (core wcslib projection) -----
+#
+# LAW_CANDIDATES.md Candidate F. Precondition: any pixel for which the
+# forward+inverse core-projection call pair both complete without raising
+# and return finite results -- "the domain where the API completes
+# normally," not a hardcoded pixel range (that domain differs by
+# projection/reference point/plate scale). Tolerance: 1e-6 px, derived from
+# two sweeps (gentle: 2000x6 projections; adversarial: 15,000 trials to
+# +/-2000px and declination 89.9 deg) with worst observed error 2.12e-10 px
+# -- ~4 orders of magnitude margin, deliberately generous since C-extension
+# rounding is less predictable a priori than pure-Python chains.
+
+_F_TOL_PX = 1e-6
+
+
+_F_EXCLUDED_PROJECTIONS = frozenset({"CSC"})
+
+
+@_guard("wcs_projection_roundtrip")
+def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
+    """AP-WCS-001: wcs_pix2world and wcs_world2pix are documented as mutual
+    inverses on the core (non-SIP) projection. Re-calling the public
+    wcs_world2pix on the world coordinate just produced must recover the
+    original pixel (LAW_CANDIDATES.md Candidate F).
+
+    ``wcs_obj`` is the WCS instance; ``original_xy`` and ``world`` are the
+    (N, 2) pixel/world arrays production code just computed; ``origin`` is
+    the same origin convention (0 or 1) used for the forward call.
+
+    CSC (COBE quad-cube) is excluded by name: a census of all 27 standard
+    projection headers shipped in astropy's own test suite found CSC alone
+    failing this law at 100% of trials (errors up to 2.5e-3 px, five orders
+    of magnitude past tolerance, unrelated to distance from the reference
+    pixel) -- wcs_world2pix's Newton inversion structurally fails to
+    disambiguate CSC's projection, not amplified rounding. Found during
+    implementation verification, not anticipated in the original design;
+    see LAW_CANDIDATES.md Candidate F's precondition-correction note.
+    """
+    import numpy as np
+
+    ctype = getattr(wcs_obj.wcs, "ctype", None)
+    if ctype is not None and any(
+        str(c).strip()[-3:] in _F_EXCLUDED_PROJECTIONS for c in ctype
+    ):
+        return
+
+    if not (np.all(np.isfinite(original_xy)) and np.all(np.isfinite(world))):
+        return
+
+    recon = wcs_obj.wcs_world2pix(world, origin)
+    if not np.all(np.isfinite(recon)):
+        return
+
+    err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
+    trigger_if(err > _F_TOL_PX, "AP-WCS-001")
+
+
+# --- Candidate G: all_world2pix's documented convergence contract ---------
+#
+# LAW_CANDIDATES.md Candidate G. Precondition: any world coordinate produced
+# by all_pix2world from a pixel within all_world2pix's convergence domain --
+# i.e. any call that returns without raising NoConvergence. Alarm: achieved
+# error > C * requested_tolerance. Derived from a 900-trial sweep (3
+# tolerances x 300 pixels, realistic SIP magnitudes): achieved/requested
+# ratio never exceeded 0.0156, giving C=10 ~6x headroom over the observed
+# worst case while staying tight relative to the caller's own tolerance.
+
+_G_TOL_C = 10.0
+
+
+@_guard("wcs_iterative_inverse_accuracy")
+def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
+    """AP-WCS-002: all_world2pix must recover the pixel that produced the
+    world coordinate it is inverting to within (a small safety margin over)
+    its own documented, caller-specified convergence tolerance
+    (LAW_CANDIDATES.md Candidate G).
+
+    Implemented on the forward side (inside all_pix2world, which computed
+    ``world`` from ``original_xy``) because only the forward call has both
+    endpoints together -- all_world2pix alone never sees what pixel
+    produced its input. Re-calls all_world2pix at its own default
+    tolerance; a NoConvergence there means the input is outside this law's
+    precondition (the domain where the API's own contract is honored), not
+    a violation.
+    """
+    import numpy as np
+
+    from astropy.wcs.wcs import NoConvergence
+
+    if not (np.all(np.isfinite(original_xy)) and np.all(np.isfinite(world))):
+        return
+
+    default_tolerance = 1e-4
+    try:
+        recon_xy = wcs_obj.all_world2pix(world, origin, tolerance=default_tolerance)
+    except NoConvergence:
+        return
+
+    if not np.all(np.isfinite(recon_xy)):
+        return
+
+    err = float(np.max(np.linalg.norm(
+        np.asarray(recon_xy) - np.asarray(original_xy), axis=-1
+    )))
+    trigger_if(err > _G_TOL_C * default_tolerance, "AP-WCS-002")
+
+
+# --- Candidate H: spectral() m<->Hz<->J composition consistency -----------
+#
+# LAW_CANDIDATES.md Candidate H. Precondition: any wavelength lambda > 0, a
+# continuous family over the full physically meaningful range. Tolerance
+# 5*eps64, derived from a 200,000-trial sweep across 18 orders of magnitude
+# (worst observed 1.15*eps64, no scale-dependent degradation since each
+# pairwise conversion is a single multiply/divide by a constant).
+#
+# Implemented by extracting the raw conversion functions directly from the
+# Equivalency list spectral() returns and composing them, rather than
+# observing a live Quantity.to() call: Quantity.to()/Unit.to() are
+# extremely hot-path, fully generic machinery used for every unit
+# conversion in astropy (not just spectral/Doppler), so hooking there would
+# be invasive and risky for a check specific to one equivalency. Calling
+# the equivalency's own returned lambdas a second time and composing them
+# is still the SANITIZER.md re-call pattern -- just applied to the table
+# spectral() constructs, rather than to a downstream .to() call.
+
+_H_TOL = 5.0 * _EPS64
+
+
+@_guard("spectral_equivalency_roundtrip")
+def check_spectral_roundtrip(equiv_list):
+    """AP-UNITS-001: spectral()'s three pairwise conversions (m<->Hz,
+    m<->J, Hz<->J) all encode the same c and h; composing wavelength ->
+    frequency -> energy -> wavelength via three different pairwise entries
+    in the table must recover the original wavelength (LAW_CANDIDATES.md
+    Candidate H). ``equiv_list`` is the Equivalency list spectral() is
+    about to return.
+    """
+    import math
+
+    entries = {}
+    for row in equiv_list:
+        if len(row) >= 3:
+            entries[(str(row[0]), str(row[1]))] = row
+
+    m_hz = entries.get(("m", "Hz"))
+    hz_j = entries.get(("Hz", "J"))
+    m_j = entries.get(("m", "J"))
+    if not (m_hz and hz_j and m_j):
+        return
+
+    m_to_hz = m_hz[2]
+    hz_to_j = hz_j[2]
+    j_to_m = m_j[2]  # m<->J is self-inverse (hc/x), so the m->J fn is its own inverse
+
+    rng_lambdas = [10.0 ** e for e in range(-15, 4)]
+    for lam in rng_lambdas:
+        freq = m_to_hz(lam)
+        energy = hz_to_j(freq)
+        lam_back = j_to_m(energy)
+        if not math.isfinite(lam_back) or lam_back == 0:
+            continue
+        relerr = abs((lam_back - lam) / lam)
+        trigger_if(relerr > _H_TOL, "AP-UNITS-001")
+
+
+# --- Candidate I: Doppler convention agreement in the low-velocity limit --
+#
+# LAW_CANDIDATES.md Candidate I. Precondition: |beta| < 1e-3, the regime
+# where the O(beta^2) next-Taylor-order term is comfortably below the
+# tolerance. Alarm compares the radio/relativistic disagreement against the
+# analytically-derived leading-order beta/2 coefficient (not "roughly
+# agree" -- that vague first draft was rewritten, see LAW_CANDIDATES.md).
+# Tolerance 1e-6 (relative), derived from a 50,000-trial sweep across 4
+# rest-quantity branches with beta in [1e-6, 1e-3].
+
+_I_BETA_MAX = 1e-3
+_I_BETA_MIN = 1e-5  # below this, float64 subtraction noise dominates (see derivation)
+_I_TOL = 1e-6
+_CKMS = 299792.458  # speed of light in km/s, matches equivalencies.py's ckms
+
+
+@_guard("doppler_convention_consistency")
+def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
+    """AP-UNITS-002: the radio and relativistic Doppler conventions must
+    disagree by exactly beta/2 in relative terms at leading order (an
+    analytically derived prediction, not an approximate "roughly agree"
+    claim) -- see LAW_CANDIDATES.md Candidate I.
+
+    ``rest_freq_hz`` is the rest frequency (plain float, Hz) doppler_radio
+    was constructed with; ``to_func_radio_hz`` is doppler_radio's own
+    Hz -> km/s conversion function for that rest frequency. Re-calls the
+    public doppler_relativistic(rest) to get the independent relativistic
+    conversion for the same rest frequency, then probes both at a small
+    set of nearby test frequencies spanning the beta precondition window.
+    """
+    from astropy import units as u
+    from astropy.units.equivalencies import doppler_relativistic
+
+    rest_q = rest_freq_hz * u.Hz
+    rel_equiv = doppler_relativistic(rest_q)
+    to_func_rel_hz = None
+    for row in rel_equiv:
+        if len(row) >= 3 and row[0] == u.Hz:
+            to_func_rel_hz = row[2]
+            break
+    if to_func_rel_hz is None:
+        return
+
+    for beta_probe in (1e-4, 3e-4, 1e-3 * 0.9):
+        test_freq = rest_freq_hz * (1 - beta_probe)
+        v_radio = to_func_radio_hz(test_freq)
+        v_rel = to_func_rel_hz(test_freq)
+
+        beta = v_rel / _CKMS
+        if not (_I_BETA_MIN < abs(beta) < _I_BETA_MAX):
+            continue
+        if v_rel == 0:
+            continue
+
+        observed_relerr = abs((v_radio - v_rel) / v_rel)
+        predicted = 0.5 * abs(beta)
+        trigger_if(abs(observed_relerr - predicted) > _I_TOL, "AP-UNITS-002")
+
+
+# --- Candidate J: relativistic Doppler cross-consistency ------------------
+#
+# LAW_CANDIDATES.md Candidate J. Precondition: any v with |beta| in (0,1) --
+# the full physically defined domain, no small-velocity restriction (both
+# equivalencies claim to be exact). Alarm normalizes by c, not by the
+# physical velocity itself (an initial normalize-by-v attempt gave a
+# degenerate worst-case ratio of 5.4e5*eps64 near v~0, from dividing a tiny
+# velocity by itself; re-normalizing by c gave a stable 1.75*eps64*c over
+# the same 200,000-trial sweep). Tolerance 10*eps64 (relative to c).
+
+_J_TOL = 10.0 * _EPS64
+
+
+@_guard("doppler_relativistic_redshift_consistency")
+def check_doppler_redshift_consistency(rest_freq_hz, to_vel_freq_func):
+    """AP-UNITS-003: doppler_relativistic's frequency-ratio formula and
+    doppler_redshift's redshift formula both claim to be the exact
+    relativistic Doppler shift for the same physical velocity; converting
+    the same shift through each independent formula must recover the same
+    velocity, to a tolerance normalized by c (LAW_CANDIDATES.md Candidate
+    J -- normalizing by the physical velocity itself is degenerate near
+    v=0 and was rejected during derivation).
+
+    ``rest_freq_hz`` is the rest frequency (float, Hz) doppler_relativistic
+    was constructed with; ``to_vel_freq_func`` is its own Hz -> km/s
+    conversion function. Re-calls the public doppler_redshift() equivalency
+    at a redshift independently derived from the same frequency ratio.
+    """
+    import math
+
+    from astropy.units.equivalencies import doppler_redshift
+
+    z_equiv = doppler_redshift()
+    convert_z_to_rv = None
+    for row in z_equiv:
+        if len(row) >= 3:
+            convert_z_to_rv = row[2]
+            break
+    if convert_z_to_rv is None:
+        return
+
+    for beta_probe in (-0.5, -0.05, 1e-4, 0.3, 0.8):
+        test_freq = rest_freq_hz * math.sqrt((1 - beta_probe) / (1 + beta_probe))
+        v_from_relativistic = to_vel_freq_func(test_freq)
+
+        z = rest_freq_hz / test_freq - 1
+        v_from_redshift = convert_z_to_rv(z)
+
+        err_over_c = abs(v_from_relativistic - v_from_redshift) / _CKMS
+        trigger_if(err_over_c > _J_TOL, "AP-UNITS-003")
+
+
+# --- Candidate K: brightness vs. thermodynamic temperature ----------------
+#
+# LAW_CANDIDATES.md Candidate K. Precondition: x = h*nu/(k*T) < 0.1, where
+# the omitted x^4/240 term (after the corrected leading term -x^2/12) stays
+# below 4.2e-7. First guess for the leading term (+x^2/12) had the wrong
+# sign, caught by checking against direct numerical evaluation of f(x)
+# before finalizing. Tolerance 1e-6, from a 30,000-trial sweep over
+# x in [0.01, 0.1].
+
+_K_X_MAX = 0.1
+_K_TOL = 1e-6
+_K_H = 6.62607015e-34  # Planck constant, SI (h)
+_K_KB = 1.380649e-23   # Boltzmann constant, SI (k_B)
+
+
+@_guard("brightness_thermodynamic_temperature_consistency")
+def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_to_k_thermo):
+    """AP-UNITS-004: brightness_temperature (Rayleigh-Jeans) and
+    thermodynamic_temperature (full Planck) differ only by the correction
+    factor f(x) = x^2*e^x/(e^x-1)^2, x = h*nu/(k*T); the ratio of the two
+    recovered temperatures must equal f(x) to within its analytically
+    derived small-x expansion 1 - x^2/12 (LAW_CANDIDATES.md Candidate K --
+    the sign of this leading term was gotten wrong on the first attempt and
+    corrected by direct numerical check before finalizing).
+
+    ``frequency_q``/``t_cmb_q`` are the Quantity inputs thermodynamic_
+    temperature was constructed with; ``convert_jy_to_k_thermo`` is its own
+    Jy/sr -> K conversion function. Re-calls the public brightness_
+    temperature(frequency_q) to get the independent Rayleigh-Jeans
+    conversion for the same frequency, on a synthetic test surface
+    brightness (the ratio of recovered temperatures is independent of the
+    test brightness value, since both formulas are linear in the input).
+    """
+    from astropy.units.equivalencies import brightness_temperature, spectral
+
+    bright_equiv = brightness_temperature(frequency_q)
+    convert_jysr_to_k_bright = None
+    for row in bright_equiv:
+        if len(row) >= 3 and str(row[0]) == "Jy / sr":
+            convert_jysr_to_k_bright = row[2]
+            break
+    if convert_jysr_to_k_bright is None:
+        return
+
+    test_x_jysr = 1.0
+    t_bright_k = convert_jysr_to_k_bright(test_x_jysr)
+    t_thermo_k = convert_jy_to_k_thermo(test_x_jysr)
+    if t_thermo_k == 0:
+        return
+
+    freq_hz = float(frequency_q.to_value("Hz", equivalencies=spectral()))
+    t_cmb_k = float(t_cmb_q.to_value("K"))
+    if t_cmb_k <= 0:
+        return
+    x = (_K_H * freq_hz) / (_K_KB * t_cmb_k)
+    if not (0 < x < _K_X_MAX):
+        return
+
+    ratio = t_bright_k / t_thermo_k
+    predicted = -(x**2) / 12.0
+    trigger_if(abs((ratio - 1) - predicted) > _K_TOL, "AP-UNITS-004")
+
+
 # --- Candidate C: spherical triangle inequality -----------------------------
 #
 # LAW_CANDIDATES.md Candidate C. Precondition: none (a metric's triangle

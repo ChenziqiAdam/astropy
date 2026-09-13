@@ -43,6 +43,7 @@ import numpy as np
 from packaging.version import Version
 
 # LOCAL
+from astropy import _scientific_checkers
 from astropy import log
 from astropy import units as u
 from astropy.io import fits
@@ -1710,7 +1711,25 @@ reduce these to 2 dimensions using the naxis kwarg.
         )
 
     def all_pix2world(self, *args, **kwargs):
-        return self._array_converter(self._all_pix2world, "output", *args, **kwargs)
+        result = self._array_converter(self._all_pix2world, "output", *args, **kwargs)
+
+        if (
+            _scientific_checkers.enabled()
+            and len(args) == 2
+            and not kwargs.get("ra_dec_order", False)
+        ):
+            try:
+                import numpy as np
+
+                xy_arr = np.asarray(args[0])
+                if xy_arr.ndim == 2 and xy_arr.shape[-1] == self.naxis == 2:
+                    _scientific_checkers.check_wcs_all_world2pix_accuracy(
+                        self, xy_arr, np.asarray(result), int(args[1])
+                    )
+            except Exception:
+                pass
+
+        return result
 
     all_pix2world.__doc__ = f"""
         Transforms pixel coordinates to world coordinates.
@@ -1781,9 +1800,27 @@ reduce these to 2 dimensions using the naxis kwarg.
     def wcs_pix2world(self, *args, **kwargs):
         if self.wcs is None:
             raise ValueError("No basic WCS settings were created.")
-        return self._array_converter(
+        result = self._array_converter(
             lambda xy, o: self.wcs.p2s(xy, o)["world"], "output", *args, **kwargs
         )
+
+        if (
+            _scientific_checkers.enabled()
+            and len(args) == 2
+            and not kwargs.get("ra_dec_order", False)
+        ):
+            try:
+                import numpy as np
+
+                xy_arr = np.asarray(args[0])
+                if xy_arr.ndim == 2 and xy_arr.shape[-1] == self.naxis == 2:
+                    _scientific_checkers.check_wcs_pix2world_roundtrip(
+                        self, xy_arr, np.asarray(result), int(args[1])
+                    )
+            except Exception:
+                pass
+
+        return result
 
     wcs_pix2world.__doc__ = f"""
         Transforms pixel coordinates to world coordinates by doing

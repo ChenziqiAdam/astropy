@@ -14,6 +14,7 @@ from typing import Final
 import numpy as np
 
 # LOCAL
+from astropy import _scientific_checkers
 from astropy.constants import si as _si
 from astropy.utils import deprecated_renamed_argument
 
@@ -156,21 +157,26 @@ def spectral():
     inv_m_spec = si.m**-1
     inv_m_ang = si.radian / si.m
 
-    return Equivalency(
-        [
-            (si.m, si.Hz, lambda x: c / x),
-            (si.m, si.J, lambda x: hc / x),
-            (si.Hz, si.J, lambda x: h * x, lambda x: x / h),
-            (si.m, inv_m_spec, lambda x: 1.0 / x),
-            (si.Hz, inv_m_spec, lambda x: x / c, lambda x: c * x),
-            (si.J, inv_m_spec, lambda x: x / hc, lambda x: hc * x),
-            (inv_m_spec, inv_m_ang, lambda x: x * two_pi, lambda x: x / two_pi),
-            (si.m, inv_m_ang, lambda x: two_pi / x),
-            (si.Hz, inv_m_ang, lambda x: two_pi * x / c, lambda x: c * x / two_pi),
-            (si.J, inv_m_ang, lambda x: x * two_pi / hc, lambda x: hc * x / two_pi),
-        ],
-        "spectral",
-    )
+    equiv_list = [
+        (si.m, si.Hz, lambda x: c / x),
+        (si.m, si.J, lambda x: hc / x),
+        (si.Hz, si.J, lambda x: h * x, lambda x: x / h),
+        (si.m, inv_m_spec, lambda x: 1.0 / x),
+        (si.Hz, inv_m_spec, lambda x: x / c, lambda x: c * x),
+        (si.J, inv_m_spec, lambda x: x / hc, lambda x: hc * x),
+        (inv_m_spec, inv_m_ang, lambda x: x * two_pi, lambda x: x / two_pi),
+        (si.m, inv_m_ang, lambda x: two_pi / x),
+        (si.Hz, inv_m_ang, lambda x: two_pi * x / c, lambda x: c * x / two_pi),
+        (si.J, inv_m_ang, lambda x: x * two_pi / hc, lambda x: hc * x / two_pi),
+    ]
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_spectral_roundtrip(equiv_list)
+        except Exception:
+            pass
+
+    return Equivalency(equiv_list, "spectral")
 
 
 @deprecated_renamed_argument(
@@ -387,6 +393,15 @@ def doppler_radio(rest):
         si.Hz: lambda x: rest_in(si.Hz) * (1 - x / ckms),
         si.AA: lambda x: rest_in(si.AA) / (1 - x / ckms),
     }
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_doppler_convention_agreement(
+                rest_in(si.Hz), to_funcs[si.Hz]
+            )
+        except Exception:
+            pass
+
     return Equivalency(
         [
             (unit, km_per_s, to_func, from_funcs[unit])
@@ -508,6 +523,14 @@ def doppler_relativistic(rest):
     def from_vel_en(x):
         voverc = x / ckms
         return rest_in(misc.eV) * ((1 - voverc) / (1 + voverc)) ** 0.5
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_doppler_redshift_consistency(
+                rest_in(si.Hz), to_vel_freq
+            )
+        except Exception:
+            pass
 
     return Equivalency(
         [
@@ -752,6 +775,14 @@ def thermodynamic_temperature(frequency, T_cmb=None):
             si.K
         )
         return x_K / factor
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_brightness_thermodynamic_consistency(
+                frequency, T_cmb, convert_Jy_to_K
+            )
+        except Exception:
+            pass
 
     return Equivalency(
         [(astrophys.Jy / si.sr, si.K, convert_Jy_to_K, convert_K_to_Jy)],
