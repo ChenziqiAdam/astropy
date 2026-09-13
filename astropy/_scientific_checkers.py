@@ -874,3 +874,214 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac):
 
     violation = sep_ac - (sep_ab + sep_bc)
     trigger_if(violation > _C_TOL, "AP-COORD-004")
+
+
+# --- Candidate O: circular std (circular method) vs circvar formula --------
+#
+# LAW_CANDIDATES.md Candidate O. Precondition: circvar(data) < 1 (nonzero
+# resultant length -- the circular method's log blows up at R=0). Tolerance:
+# 1000 * eps64, derived from a 200,000-trial sweep (worst relative error
+# 2.17e-14 ~= 100*eps64 for the circular method's extra log+sqrt chain; the
+# angular method matched exactly and is not separately instrumented).
+
+_O_TOL_C = 1000.0
+
+
+@_guard("circular_stats_formula_consistency")
+def check_circstd_circvar_consistency(data, axis, weights, circular_value):
+    """AP-STATS-001: circstd(data, method='circular') must equal
+    sqrt(-2*ln(1 - circvar(data))), both public functions built on the same
+    mean resultant length R (LAW_CANDIDATES.md Candidate O). ``data``/
+    ``axis``/``weights`` are the arguments a production circstd(method=
+    'circular') call just used; ``circular_value`` is the value it returned.
+    Re-calls the independent circvar() on the same input.
+    """
+    import math
+
+    from astropy.stats.circstats import circvar
+    from astropy.units import Quantity
+
+    try:
+        cv = circvar(data, axis, weights)
+        cv_val = float(cv.value if isinstance(cv, Quantity) else cv)
+        result_val = float(
+            circular_value.value
+            if isinstance(circular_value, Quantity)
+            else circular_value
+        )
+    except (TypeError, ValueError):
+        return
+    if not (math.isfinite(cv_val) and math.isfinite(result_val)):
+        return
+    resultant = 1.0 - cv_val
+    if resultant <= 0:
+        return
+
+    predicted = math.sqrt(-2.0 * math.log(resultant))
+    relerr = abs(result_val - predicted) / max(abs(predicted), 1e-300)
+    trigger_if(relerr > _O_TOL_C * _EPS64, "AP-STATS-001")
+
+
+# --- Candidate P: biweight_location affine equivariance ---------------------
+#
+# LAW_CANDIDATES.md Candidate P. Precondition: >= 5 elements, nonzero MAD,
+# a > 0 (only the analytically-verified sign is checked). Tolerance: 1e-8
+# relative, derived from a 100,000-trial sweep (worst relative error 2.52e-12
+# with |a|, |b| up to 1e6 and 1/3 outlier-injected trials).
+
+_P_TOL = 1e-8
+
+
+@_guard("biweight_affine_equivariance")
+def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
+    """AP-STATS-002: biweight_location(a*x + b) == a*biweight_location(x) + b
+    for a > 0 (LAW_CANDIDATES.md Candidate P). ``data``/``c``/``axis``/
+    ``ignore_nan`` are the arguments a production call just used;
+    ``result`` is the value it returned. Re-calls biweight_location on an
+    affine-transformed copy of the same data; never mutates the original.
+    """
+    import numpy as np
+
+    from astropy.stats.biweight import biweight_location
+
+    arr = np.asanyarray(data)
+    if arr.ndim != 1 or arr.size < 5:
+        return
+    try:
+        base = float(result)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(base):
+        return
+
+    rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
+    a = float(rng.uniform(2.0, 1e4))
+    b = float(rng.uniform(-1e4, 1e4))
+    transformed = a * arr + b
+
+    other = biweight_location(transformed, c=c, axis=axis, ignore_nan=ignore_nan)
+    try:
+        other_val = float(other)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(other_val):
+        return
+
+    predicted = a * base + b
+    scale = max(abs(predicted), abs(other_val), 1.0)
+    relerr = abs(other_val - predicted) / scale
+    trigger_if(relerr > _P_TOL, "AP-STATS-002")
+
+
+# --- Candidate Q: biweight_midvariance quadratic scale equivariance --------
+#
+# LAW_CANDIDATES.md Candidate Q. Precondition: >= 5 elements, nonzero MAD
+# (any sign of a). Tolerance: 1e-9 relative, derived from a 100,000-trial
+# sweep (worst relative error 8.46e-14 with |a|, |b| up to 1e6, both signs).
+
+_Q_TOL = 1e-9
+
+
+@_guard("biweight_scale_equivariance")
+def check_biweight_midvariance_equivariance(
+    data, c, axis, modify_sample_size, ignore_nan, result
+):
+    """AP-STATS-003: biweight_midvariance(a*x + b) == a**2 *
+    biweight_midvariance(x) for any real a, b (LAW_CANDIDATES.md
+    Candidate Q). Same argument/re-call pattern as AP-STATS-002.
+
+    Must forward ``modify_sample_size``: it changes which points count
+    toward n (the outlier-rejection mask), so omitting it makes the
+    re-call answer a different question than the production call asked
+    (differential-test contract, arg-forwarding class -- found by
+    self-verification via test_biweight_midvariance_small's
+    modify_sample_size=True case, not by an external audit).
+    """
+    import numpy as np
+
+    from astropy.stats.biweight import biweight_midvariance
+
+    arr = np.asanyarray(data)
+    if arr.ndim != 1 or arr.size < 5:
+        return
+    try:
+        base = float(result)
+    except (TypeError, ValueError):
+        return
+    if not (np.isfinite(base) and base > 0):
+        return
+
+    rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
+    a = float(rng.choice([-1.0, 1.0])) * float(rng.uniform(2.0, 1e4))
+    b = float(rng.uniform(-1e4, 1e4))
+    transformed = a * arr + b
+
+    other = biweight_midvariance(
+        transformed,
+        c=c,
+        axis=axis,
+        modify_sample_size=modify_sample_size,
+        ignore_nan=ignore_nan,
+    )
+    try:
+        other_val = float(other)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(other_val):
+        return
+
+    predicted = a * a * base
+    scale = max(abs(predicted), abs(other_val), 1e-300)
+    relerr = abs(other_val - predicted) / scale
+    trigger_if(relerr > _Q_TOL, "AP-STATS-003")
+
+
+# --- Candidate R: jackknife closed form for the mean statistic -------------
+#
+# LAW_CANDIDATES.md Candidate R. Precondition: statistic is np.mean itself
+# (not merely numerically matching it). Tolerance: bias 1e-8 relative to
+# max(|mean|,1); std_err 1e-10 relative -- derived from a 20,000-trial sweep
+# (worst bias 4.95e-12, worst std_err relative error 2.84e-15).
+
+_R_BIAS_TOL = 1e-8
+_R_SE_TOL = 1e-10
+
+
+@_guard("jackknife_mean_closed_form")
+def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
+    """AP-STATS-004: for statistic=np.mean, jackknife bias is exactly 0 and
+    std_err equals sqrt(sum((x-xbar)**2)/(n*(n-1))) (LAW_CANDIDATES.md
+    Candidate R). Only fires when the caller's statistic is np.mean by
+    identity, to avoid any ambiguity about why a caller's function might
+    numerically match the mean on one particular input.
+    """
+    import math
+
+    import numpy as np
+
+    if statistic is not np.mean:
+        return
+
+    arr = np.asanyarray(data)
+    if arr.ndim != 1 or arr.size < 2:
+        return
+    if not np.all(np.isfinite(arr)):
+        return
+
+    try:
+        bias_val = float(bias)
+        se_val = float(std_err)
+    except (TypeError, ValueError):
+        return
+    if not (np.isfinite(bias_val) and np.isfinite(se_val)):
+        return
+
+    xbar = float(np.mean(arr))
+    n = arr.size
+
+    bias_scale = max(abs(xbar), 1.0)
+    trigger_if(abs(bias_val) / bias_scale > _R_BIAS_TOL, "AP-STATS-004")
+
+    predicted_se = math.sqrt(float(np.sum((arr - xbar) ** 2)) / (n * (n - 1)))
+    se_relerr = abs(se_val - predicted_se) / max(abs(predicted_se), 1e-300)
+    trigger_if(se_relerr > _R_SE_TOL, "AP-STATS-004")

@@ -13,6 +13,7 @@ are based on reference [1]_, which is also the basis for the R package
 import numpy as np
 from numpy.typing import NDArray
 
+from astropy import _scientific_checkers
 from astropy.units import Quantity
 
 __all__ = [
@@ -267,7 +268,15 @@ def circstd(
     if method == "angular":
         return np.sqrt(2.0 * (1.0 - _length(data, 1.0, 0.0, axis, weights)))
     else:
-        return np.sqrt(-2.0 * np.log(_length(data, 1.0, 0.0, axis, weights)))
+        result = np.sqrt(-2.0 * np.log(_length(data, 1.0, 0.0, axis, weights)))
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_circstd_circvar_consistency(
+                    data, axis, weights, result
+                )
+            except Exception:
+                pass
+        return result
 
 
 def circmoment(

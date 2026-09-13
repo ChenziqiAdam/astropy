@@ -5,6 +5,8 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import NDArray
 
+from astropy import _scientific_checkers
+
 __all__ = ["jackknife_resampling", "jackknife_stats"]
 __doctest_requires__ = {"jackknife_stats": ["scipy"]}
 
@@ -182,5 +184,13 @@ def jackknife_stats(
 
     z_score = np.sqrt(2.0) * erfinv(confidence_level)
     conf_interval = estimate + z_score * np.array((-std_err, std_err))
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_jackknife_mean_closed_form(
+                data, statistic, bias, std_err
+            )
+        except Exception:
+            pass
 
     return estimate, bias, std_err, conf_interval

@@ -9,6 +9,7 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from astropy import _scientific_checkers
 from astropy.stats.funcs import median_absolute_deviation
 from astropy.stats.nanfunctions import nanmedian, nansum
 from astropy.utils.masked import Masked
@@ -186,6 +187,13 @@ def biweight_location(
             sum_func(d * u, axis=axis) / sum_func(u, axis=axis)
         )
         if np.isscalar(value):
+            if _scientific_checkers.enabled():
+                try:
+                    _scientific_checkers.check_biweight_location_equivariance(
+                        data, c, axis, ignore_nan, value
+                    )
+                except Exception:
+                    pass
             return value
 
         where_func = np.where
@@ -496,6 +504,13 @@ def biweight_midvariance(
     with np.errstate(divide="ignore", invalid="ignore"):
         value = n * f1 / f2
         if np.isscalar(value):
+            if _scientific_checkers.enabled():
+                try:
+                    _scientific_checkers.check_biweight_midvariance_equivariance(
+                        data, c, axis, modify_sample_size, ignore_nan, value
+                    )
+                except Exception:
+                    pass
             return value
 
         where_func = np.where
