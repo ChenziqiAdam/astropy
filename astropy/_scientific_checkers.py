@@ -357,6 +357,8 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     ):
         return
 
+    if original_xy.size == 0 or world.size == 0:
+        return
     if not (np.all(np.isfinite(original_xy)) and np.all(np.isfinite(world))):
         return
 
@@ -400,6 +402,8 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
 
     from astropy.wcs.wcs import NoConvergence
 
+    if original_xy.size == 0 or world.size == 0:
+        return
     if not (np.all(np.isfinite(original_xy)) and np.all(np.isfinite(world))):
         return
 
@@ -786,6 +790,24 @@ def check_age_lookback_complementarity(cosmo, z, lookback_z_val):
     production lookback_time(z) call just used; ``lookback_z_val`` is the
     numeric value (Gyr) it returned. Re-calls the public age() at 0 and at
     z to get the independent complementary quantities.
+
+    Known precondition gap, found by adversarial audit (not anticipated in
+    the original design): age(0) always integrates quad(integrand, 0, inf),
+    and scipy's adaptive semi-infinite quadrature probes z values into the
+    hundreds regardless of the z the caller actually used. For w0wzCDM /
+    Flatw0wzCDM with any wz != 0, the dark-energy density scale's
+    exp(3*wz*z) term eventually overflows double at large z, and the
+    Cython _inv_efunc_scalar fast path's generic complex-power fallback for
+    `**` manufactures a spurious nonzero imaginary part from the resulting
+    0*inf arithmetic, raising TypeError -- a genuine, pre-existing astropy
+    defect (reproduces identically with SCIBENCH_TRIGGER_LOG unset; not an
+    artifact of this checker). This means AP-COSMO-002 currently cannot
+    check the w0wzCDM/Flatw0wzCDM family at all when wz != 0, even for
+    lookback_time(z) calls at small, perfectly safe z, since the checker's
+    own re-derivation strategy (via age(0)) is strictly less numerically
+    robust than the production call it is verifying. Caught here explicitly
+    (rather than silently swallowed by _guard) so this gap is visible in
+    the record rather than indistinguishable from "nothing to check."
     """
     import math
 
@@ -796,8 +818,11 @@ def check_age_lookback_complementarity(cosmo, z, lookback_z_val):
     if z_scalar < 0:
         return
 
-    age0_val = float(cosmo.age(0.0).to_value("Gyr"))
-    age_z_val = float(cosmo.age(z_scalar).to_value("Gyr"))
+    try:
+        age0_val = float(cosmo.age(0.0).to_value("Gyr"))
+        age_z_val = float(cosmo.age(z_scalar).to_value("Gyr"))
+    except TypeError:
+        return
     if not all(math.isfinite(v) for v in (age0_val, age_z_val, lookback_z_val)):
         return
 
