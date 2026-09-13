@@ -22,6 +22,7 @@ from weakref import WeakValueDictionary
 import erfa
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy import constants as const
 from astropy import units as u
 from astropy.extern import _strptime
@@ -1799,6 +1800,18 @@ class TimeBase(MaskableShapedLikeNDArray):
                         # Prevent future modification of cached array-like object
                         tm.writeable = False
                 cache[attr] = tm
+
+                if (
+                    tm is not self
+                    and _scientific_checkers.enabled()
+                    and isinstance(self, Time)
+                ):
+                    try:
+                        _scientific_checkers.check_time_scale_roundtrip(
+                            self, tm, attr
+                        )
+                    except Exception:
+                        pass
             return cache[attr]
 
         elif attr in self.FORMATS:
@@ -2657,6 +2670,7 @@ class Time(TimeBase):
         # T      - Tdelta = T
         # T      - T      = Tdelta
         other_is_delta = not isinstance(other, Time)
+        other_orig = other if not other_is_delta else None
         if other_is_delta:  # T - Tdelta
             # Check other is really a TimeDelta or something that can initialize.
             if not isinstance(other, TimeDelta):
@@ -2712,6 +2726,13 @@ class Time(TimeBase):
         if other_is_delta:
             # Go back to left-side scale if needed
             out._set_scale(self.scale)
+        elif _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_time_arithmetic_inverse(
+                    other_orig, self, out
+                )
+            except Exception:
+                pass
 
         return out
 

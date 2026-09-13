@@ -196,6 +196,121 @@ def check_frame_roundtrip_3d(orig_xyz, recon_xyz):
     trigger_if(relerr > tol, "AP-COORD-003")
 
 
+# --- Candidate D: Time scale round-trip identity (analytic scales only) ---
+#
+# LAW_CANDIDATES.md Candidate D. Precondition: the epoch's Julian date must
+# fall within the *loaded* leap-second table's validity range (queried at
+# runtime, not hardcoded, since a newer astropy release ships an updated
+# table); UT1 is excluded entirely (its conversion depends on interpolated
+# IERS Earth-orientation data, a different error source). Tolerance: 5e-11 s,
+# derived from a 25,000-trial sweep across 5 round-trip loops spanning
+# 1972-2016 (worst observed error 8.87e-12 s, under half the naive
+# single-double day-precision floor of ~1.92e-11 s).
+
+_D_TOL_SEC = 5e-11
+_leap_table_range = None  # lazily cached (year_min, year_max) or a sentinel
+
+
+def _leap_table_year_range():
+    global _leap_table_range
+    if _leap_table_range is None:
+        from astropy.utils import iers
+
+        table = iers.LeapSeconds.auto_open()
+        _leap_table_range = (
+            int(table["year"].min()),
+            int(table["year"].max()),
+        )
+    return _leap_table_range
+
+
+@_guard("time_scale_roundtrip")
+def check_time_scale_roundtrip(original, converted, new_scale):
+    """AP-TIME-001: a single scale conversion must be its own inverse when
+    immediately reversed -- every pairwise conversion in the analytic
+    (non-UT1) subset of MULTI_HOPS is an exactly invertible relation, and a
+    multi-hop loop reduces to this hop-by-hop (LAW_CANDIDATES.md Candidate D).
+
+    ``original`` is the Time instance before conversion; ``converted`` is
+    the same instant re-expressed in ``new_scale`` by production code. UT1
+    is excluded (interpolated IERS data, a different error source); the
+    leap-second table's own validity range gates any UTC-involving pair.
+    Restricted to scalar, unmasked Time instances (see LAW_CANDIDATES.md
+    Candidate D -- array support is a known, documented limitation; a masked
+    scalar's jd1/jd2 is a fill-value sentinel, not a real epoch, so the
+    round-trip law does not apply to it -- found via astropy's own
+    test_mask.py, not anticipated in the original design).
+    """
+    if original.shape != () or original.masked:
+        return
+    if new_scale == "ut1" or original.scale == "ut1":
+        return
+
+    year_min, year_max = _leap_table_year_range()
+    if original.scale == "utc" or new_scale == "utc":
+        decimalyear = float(original.decimalyear)
+        if not (year_min <= decimalyear <= year_max):
+            return
+
+    # Do not use getattr(converted, original.scale): that populates
+    # converted's own lazy scale cache as a side effect, which is observable
+    # production state (see astropy/time/tests/test_basic.py::test_cache) and
+    # would violate SANITIZER.md 5.5. Replicate first, exactly mirroring what
+    # Time.__getattr__ itself does internally to avoid touching the cache.
+    # ``original`` is also replicated before use as a subtraction operand:
+    # Time.__sub__ can itself populate a scale-cache entry on its second
+    # operand (empirically confirmed), and original is the real Time object
+    # production code (and the caller) is holding.
+    back = converted.replicate()
+    back._set_scale(original.scale)
+    err_sec = abs(float((back - original.replicate()).sec))
+    trigger_if(err_sec > _D_TOL_SEC, "AP-TIME-001")
+
+
+# --- Candidate E: Time arithmetic inverse (subtraction/addition) ----------
+#
+# LAW_CANDIDATES.md Candidate E. Precondition: same leap-second-table
+# validity restriction as Candidate D when either epoch is UTC-involving;
+# otherwise unrestricted (no small/large-delta restriction -- checked, not
+# assumed, up to ~40-year separations). Tolerance: 5e-11 s, derived from a
+# 20,000-trial sweep across 6 scales including a large-delta stress variant
+# (worst observed error 9.59e-12 s, no separation-magnitude dependence).
+
+_E_TOL_SEC = 5e-11
+
+
+@_guard("time_arithmetic_inverse")
+def check_time_arithmetic_inverse(t1, t2, delta):
+    """AP-TIME-002: Time.__sub__ and Time.__add__ form an additive group
+    action -- T1 + (T2 - T1) must equal T2 for any two valid epochs
+    (LAW_CANDIDATES.md Candidate E).
+
+    ``t1``, ``t2`` are the two Time operands of a production ``t2 - t1``
+    call; ``delta`` is the TimeDelta production code actually computed.
+    Restricted to scalar, unmasked Time instances (see LAW_CANDIDATES.md
+    Candidate E -- same reasoning as Candidate D's array/masked exclusions).
+    """
+    if t1.shape != () or t2.shape != () or t1.masked or t2.masked:
+        return
+
+    year_min, year_max = _leap_table_year_range()
+    if t1.scale == "utc" and not (year_min <= float(t1.decimalyear) <= year_max):
+        return
+    if t2.scale == "utc" and not (year_min <= float(t2.decimalyear) <= year_max):
+        return
+
+    # Use replicas throughout, never t1/t2/delta directly: Time.__add__ can
+    # populate a scale-cache entry on its TimeDelta operand, and Time.__sub__
+    # can populate one on its second Time operand (both observed empirically
+    # -- see astropy/time/tests/test_basic.py::test_cache for the invariant
+    # this protects). Re-deriving with the real objects would leak this
+    # checker's own re-computation into production object state, which
+    # SANITIZER.md 5.5 forbids.
+    recon = t1.replicate() + delta.replicate()
+    err_sec = abs(float((recon - t2.replicate()).sec))
+    trigger_if(err_sec > _E_TOL_SEC, "AP-TIME-002")
+
+
 # --- Candidate C: spherical triangle inequality -----------------------------
 #
 # LAW_CANDIDATES.md Candidate C. Precondition: none (a metric's triangle
