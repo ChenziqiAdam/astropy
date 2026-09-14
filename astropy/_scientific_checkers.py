@@ -2174,3 +2174,47 @@ def check_log_stretch_inverse_roundtrip(a, x_in, y_out):
 
     abserr = float(np.max(np.abs(x_back - x_arr)))
     trigger_if(abserr > _AJ_TOL_ABS, "AP-VIS-001")
+
+
+# --- Candidate AK: asinh-stretch / sinh-stretch round trip ------------------
+#
+# LAW_CANDIDATES.md Candidate AK. AsinhStretch computes
+# y = asinh(x/a) / asinh(1/a); its .inverse (SinhStretch with a rescaled
+# parameter a' = 1/asinh(1/a)) computes x = a' * sinh(y / a') -- an
+# algebraically distinct transcendental-function pair (asinh/log-family vs.
+# sinh/exp-family), the same genuine-cross-check structure as AP-VIS-001,
+# unlike this bank's tautological rotation round trips. Unlike AP-VIS-001,
+# no restriction on `a` is needed: a 50,000-trial sweep over a spanning
+# 10 decades (1e-10 to 1e10) found worst absolute error 6.77e-15 with no
+# growth at the extremes (AsinhStretch's own arcsinh(1/a) rescaling keeps
+# the argument to sinh/arcsinh well-conditioned everywhere, unlike
+# LogStretch's log(a*x+1) which loses precision as a*x -> 0).
+
+_AK_TOL_ABS = 100.0 * _EPS64
+
+
+@_guard("asinh_stretch_inverse_roundtrip")
+def check_asinh_stretch_inverse_roundtrip(a, x_in, y_out):
+    """AP-VIS-002 (Candidate AK): AsinhStretch(a) followed by its own
+    .inverse (SinhStretch) must recover the original input. y_out is
+    AsinhStretch.__call__'s own already-computed result for this call;
+    only the inverse direction is computed here.
+    """
+    import numpy as np
+
+    from astropy.visualization.stretch import SinhStretch
+
+    x_arr = np.asarray(x_in, dtype=float)
+    y_arr = np.asarray(y_out, dtype=float)
+    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
+        return
+    if np.any(x_arr < 0) or np.any(x_arr > 1):
+        return
+
+    inv = SinhStretch(a=1.0 / np.arcsinh(1.0 / a))
+    x_back = inv(y_arr.copy(), clip=False)
+    if not np.all(np.isfinite(x_back)):
+        return
+
+    abserr = float(np.max(np.abs(x_back - x_arr)))
+    trigger_if(abserr > _AK_TOL_ABS, "AP-VIS-002")

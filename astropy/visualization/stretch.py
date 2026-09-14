@@ -722,9 +722,24 @@ class AsinhStretch(BaseStretch):
 
     def __call__(self, values, clip=True, out=None):
         values = _prepare(values, clip=clip, out=out)
+
+        from astropy import _scientific_checkers
+
+        check_roundtrip = _scientific_checkers.enabled() and clip
+        original_values = np.array(values, copy=True) if check_roundtrip else None
+
         np.true_divide(values, self.a, out=values)
         np.arcsinh(values, out=values)
         np.true_divide(values, np.arcsinh(1.0 / self.a), out=values)
+
+        if check_roundtrip:
+            try:
+                _scientific_checkers.check_asinh_stretch_inverse_roundtrip(
+                    self.a, original_values, values
+                )
+            except Exception:
+                pass
+
         return values
 
     @property
