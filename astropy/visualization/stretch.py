@@ -409,9 +409,24 @@ class PowerDistStretch(BaseStretch):
 
     def __call__(self, values, clip=True, out=None):
         values = _prepare(values, clip=clip, out=out)
+
+        from astropy import _scientific_checkers
+
+        check_roundtrip = _scientific_checkers.enabled() and clip
+        original_values = np.array(values, copy=True) if check_roundtrip else None
+
         np.power(self.a, values, out=values)
         np.subtract(values, 1, out=values)
         np.true_divide(values, self.a - 1.0, out=values)
+
+        if check_roundtrip:
+            try:
+                _scientific_checkers.check_power_dist_stretch_inverse_roundtrip(
+                    self.a, original_values, values
+                )
+            except Exception:
+                pass
+
         return values
 
     @property

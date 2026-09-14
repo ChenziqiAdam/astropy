@@ -2218,3 +2218,55 @@ def check_asinh_stretch_inverse_roundtrip(a, x_in, y_out):
 
     abserr = float(np.max(np.abs(x_back - x_arr)))
     trigger_if(abserr > _AK_TOL_ABS, "AP-VIS-002")
+
+
+# --- Candidate AL: power-dist-stretch / inverted-power-dist-stretch --------
+#
+# LAW_CANDIDATES.md Candidate AL. PowerDistStretch computes
+# y = (a^x - 1) / (a - 1); its .inverse (InvertedPowerDistStretch) computes
+# the algebraically distinct closed form x = log(y*(a-1)+1) / log(a) -- a
+# genuine power/exp-vs-log transcendental-function pair, the same
+# cross-check structure as AP-VIS-001/AP-VIS-002. Like AP-VIS-001 (and
+# unlike AP-VIS-002), a precondition on `a` is needed: very small |a|
+# (near the a=0 singularity of the power-law shape) and the immediate
+# neighborhood of a=1 (the a=1 branch point where the formula itself is
+# singular, PowerDistStretch's own __init__ rejects a==1 exactly but not
+# a near 1) both cause catastrophic cancellation that is a precision
+# limit of the formulas, not a real drift between the two directions.
+
+_AL_TOL_ABS = 1000.0 * _EPS64
+_AL_A_MIN = 1e-3
+_AL_A_MAX = 1e3
+_AL_A_EXCLUDE_RADIUS = 1e-2
+
+
+@_guard("power_dist_stretch_inverse_roundtrip")
+def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
+    """AP-VIS-003 (Candidate AL): PowerDistStretch(a) followed by its own
+    .inverse (InvertedPowerDistStretch(a)) must recover the original
+    input. y_out is PowerDistStretch.__call__'s own already-computed
+    result for this call; only the inverse direction is computed here.
+    """
+    import numpy as np
+
+    from astropy.visualization.stretch import InvertedPowerDistStretch
+
+    if not (_AL_A_MIN <= abs(a) <= _AL_A_MAX):
+        return
+    if abs(a - 1.0) < _AL_A_EXCLUDE_RADIUS:
+        return
+
+    x_arr = np.asarray(x_in, dtype=float)
+    y_arr = np.asarray(y_out, dtype=float)
+    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
+        return
+    if np.any(x_arr < 0) or np.any(x_arr > 1):
+        return
+
+    inv = InvertedPowerDistStretch(a=a)
+    x_back = inv(y_arr.copy(), clip=False)
+    if not np.all(np.isfinite(x_back)):
+        return
+
+    abserr = float(np.max(np.abs(x_back - x_arr)))
+    trigger_if(abserr > _AL_TOL_ABS, "AP-VIS-003")
