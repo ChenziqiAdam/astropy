@@ -1586,3 +1586,135 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
             _check_cgs_charge(abbrev, system, value, mod)
     elif abbrev in _GM_MASS_ABBREVS:
         _check_mass_from_gm(abbrev, value, mod)
+
+
+# --- Candidate Z: Lomb-Scargle cross-implementation agreement ---------------
+#
+# LAW_CANDIDATES.md Candidate Z. Precondition: nterms=1, regular frequency
+# grid (fast's own domain), any normalization/fit_mean/center_data. Absolute
+# tolerance -- power is intrinsically bounded, not a quantity that should be
+# normalized by itself (the same reasoning as Candidate J's c-normalized
+# Doppler check). Tolerance: 1e-6 absolute, derived from two independent
+# 500-trial sweeps (worst 7.30e-11 and 2.42e-10) -- fast's FFT/extirpolation
+# scheme is a genuine bounded approximation to slow's exact sum, not an
+# alternative exact evaluation, so eps64-scale agreement is not expected
+# (unlike every prior cross-implementation candidate in this bank).
+#
+# Re-deriving via method='slow' is O(N * Nfreq), the same cost class as
+# AP-CONV-003's re-call to convolve_fft -- capped by problem size (not by
+# correctness) for the same reason: even when enabled for evaluation, an
+# unbounded O(N^2)-ish re-derivation on every fast-method call should not
+# make the checker itself the bottleneck. Cap chosen generously above
+# realistic test-suite sizes, not tuned to any specific input.
+
+_Z_TOL = 1e-6
+_Z_MAX_COST = 2_000_000  # N * Nfreq
+
+
+@_guard("lombscargle_cross_implementation")
+def check_lombscargle_cross_implementation(
+    t, y, dy, frequency, center_data, fit_mean, nterms, normalization, power
+):
+    """AP-TS-001 (Candidate Z): LombScargle.power(..., method='fast') must
+    agree with method='slow' on the same inputs, within fast's own
+    documented approximation budget (not eps64 -- fast is an approximate
+    FFT/extirpolation scheme, slow is the exact direct sum).
+    """
+    import numpy as np
+
+    from astropy.timeseries.periodograms.lombscargle.implementations.main import (
+        lombscargle,
+    )
+
+    if nterms != 1:
+        return
+    freq = np.asarray(frequency)
+    if freq.ndim != 1 or freq.size < 2:
+        return
+    t_size = np.asarray(t).size
+    if t_size * freq.size > _Z_MAX_COST:
+        return
+    power_arr = np.asarray(power)
+    if power_arr.shape != freq.shape or not np.all(np.isfinite(power_arr)):
+        return
+
+    t_arr = np.asarray(t)
+    y_arr = np.asarray(y)
+    dy_arr = None if dy is None else np.asarray(dy)
+
+    try:
+        slow_power = lombscargle(
+            t_arr,
+            y_arr,
+            dy_arr,
+            frequency=freq,
+            center_data=center_data,
+            fit_mean=fit_mean,
+            nterms=nterms,
+            normalization=normalization,
+            method="slow",
+        )
+    except Exception:
+        return
+    slow_power = np.asarray(slow_power)
+    if slow_power.shape != power_arr.shape or not np.all(np.isfinite(slow_power)):
+        return
+
+    diff = float(np.max(np.abs(power_arr - slow_power)))
+    trigger_if(diff > _Z_TOL, "AP-TS-001")
+
+
+# --- Candidate AB: single-frequency false-alarm-probability round trip -----
+#
+# LAW_CANDIDATES.md Candidate AB. Precondition: fap in (0,1), dK-dH==2 (the
+# only case _statistics.py implements), N > dK. Absolute tolerance -- fap is
+# a probability, intrinsically bounded to [0,1]. Tolerance: 1e-9 absolute,
+# derived from an 80,000-trial sweep across all 4 normalizations (worst
+# 5.51e-13) -- both directions are short closed-form elementary-function
+# chains, an ordinary few-hundred-ULP composition.
+
+_AB_TOL = 1e-9
+
+
+@_guard("false_alarm_probability_roundtrip")
+def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
+    """AP-TS-002 (Candidate AB): fap_single(inv_fap_single(fap, ...), ...)
+    == fap -- fap_single and inv_fap_single are independently coded
+    algebraic inverses of each other, one per normalization branch.
+
+    ``z`` is inv_fap_single's own return value for the production call
+    (``inv_fap_single(fap, N, normalization, dH=dH, dK=dK)``) -- passed in
+    directly rather than re-derived here, so this checker only ever
+    exercises the *other* direction (``fap_single``), never re-running
+    ``inv_fap_single`` against its own output.
+    """
+    import math
+
+    from astropy.timeseries.periodograms.lombscargle._statistics import (
+        fap_single,
+    )
+
+    if dK - dH != 2:
+        return
+    try:
+        fap_val = float(fap)
+        z_val = float(z)
+    except (TypeError, ValueError):
+        return
+    if not (math.isfinite(fap_val) and 0.0 < fap_val < 1.0):
+        return
+    if not math.isfinite(z_val):
+        return
+    if not (isinstance(N, (int,)) or float(N).is_integer()):
+        return
+    if N <= dK:
+        return
+
+    try:
+        fap_roundtrip = float(fap_single(z_val, N, normalization, dH=dH, dK=dK))
+    except Exception:
+        return
+    if not math.isfinite(fap_roundtrip):
+        return
+
+    trigger_if(abs(fap_roundtrip - fap_val) > _AB_TOL, "AP-TS-002")

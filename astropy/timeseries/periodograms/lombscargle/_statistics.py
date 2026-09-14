@@ -188,15 +188,28 @@ def inv_fap_single(fap, N, normalization, dH=1, dK=3):
     # No warnings for fap = 0; rather, just let it give the right infinity.
     with np.errstate(divide="ignore"):
         if normalization == "psd":
-            return -np.log(fap)
+            z = -np.log(fap)
         elif normalization == "standard":
-            return 1 - fap ** (2 / Nk)
+            z = 1 - fap ** (2 / Nk)
         elif normalization == "model":
-            return -1 + fap ** (-2 / Nk)
+            z = -1 + fap ** (-2 / Nk)
         elif normalization == "log":
-            return -2 / Nk * np.log(fap)
+            z = -2 / Nk * np.log(fap)
         else:
             raise ValueError(f"normalization='{normalization}' is not recognized")
+
+    if fap.ndim == 0:
+        from astropy import _scientific_checkers
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_fap_roundtrip(
+                    fap, z, N, normalization, dH, dK
+                )
+            except Exception:
+                pass
+
+    return z
 
 
 def cdf_single(z, N, normalization, dH=1, dK=3):

@@ -237,4 +237,24 @@ def lombscargle(
             )
 
     PLS = METHODS[method](*args, **kwds)
+
+    if method == "fast":
+        from astropy import _scientific_checkers
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_lombscargle_cross_implementation(
+                    t,
+                    y,
+                    dy,
+                    frequency,
+                    center_data,
+                    fit_mean,
+                    nterms,
+                    normalization,
+                    PLS,
+                )
+            except Exception:
+                pass
+
     return PLS.reshape(output_shape)
