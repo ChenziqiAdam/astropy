@@ -6,6 +6,7 @@ import warnings
 
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy.units.core import Unit
 from astropy.units.errors import UnitsError
 from astropy.units.quantity import Quantity
@@ -157,6 +158,18 @@ class Constant(Quantity, metaclass=ConstantMeta):
         inst._system = system
 
         inst._checked_units = False
+
+        if _scientific_checkers.enabled():
+            try:
+                import sys
+
+                caller_globals = sys._getframe(1).f_globals
+                _scientific_checkers.check_constant_relation(
+                    abbrev, system, value, uncertainty, caller_globals
+                )
+            except Exception:
+                pass
+
         return inst
 
     def __repr__(self):

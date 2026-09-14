@@ -1289,3 +1289,187 @@ def check_convolution_cross_implementation(
     diff = np.max(np.abs(res[finite_mask] - fft_res[finite_mask]))
     scale = max(1.0, float(np.max(np.abs(arr[np.isfinite(arr)]), initial=0.0)))
     trigger_if(float(diff) > _U_TOL * scale, "AP-CONV-003")
+
+
+# --- Candidates V/W/X/Y: astropy.constants cross-constant relations --------
+#
+# LAW_CANDIDATES.md Candidates V-Y. All four re-derive a constant from
+# sibling constants and compare against the value astropy itself just
+# constructed. Confirmed at implementation time (not merely assumed from
+# the design doc): sigma_sb/R/e_esu/e_emu/e_gauss/M_sun/M_jup/M_earth are
+# ALL computed via this exact formula in-repo for the current default
+# vintage (CODATA2022/IAU2015), so bit-for-bit agreement is the correct
+# invariant there, not merely an approximate one. CODATA2010/2014 are the
+# cases where sigma_sb/R are independently published literals rather than
+# in-repo-derived (relative errors 6.66e-8/3.24e-8 for sigma_sb, 5.47e-9/
+# 7.39e-9 for R -- both far tighter than the design doc's original ~1e-5
+# estimate from CODATA's published measurement-uncertainty ratio,
+# confirming CODATA fits these jointly/consistently rather than merely
+# "within stated uncertainty").
+#
+# Global-config bug found during self-verification (not an external
+# audit): the first version read sibling constants (h, k_B, c, N_A, G) from
+# `astropy.constants.config.codata`/`.iaudata` -- the process-wide *active*
+# vintage -- rather than from the vintage module actually being
+# constructed. Every non-default vintage module (codata2010.py,
+# codata2014.py, codata2018.py, iau2012.py) executes standalone at import
+# time (e.g. `from astropy.constants.codata2010 import c` runs the *whole*
+# module, constructing its sigma_sb/R too) while the global config still
+# points at the default (2022/2015) -- so the checker was silently
+# comparing one vintage's sigma_sb against a DIFFERENT vintage's h/k_B/c,
+# a mismatched-vintage bug, not a real inconsistency. Caught via
+# astropy/constants/tests/test_prior_version.py::test_c (10 total triggers
+# across that file) -- even the "just check c is exact" test triggered,
+# because importing codata2010.c as a side effect constructs the whole
+# module. Fixed by reading siblings from the *constructing* module's own
+# namespace (via the caller's stack frame globals, since `Constant.__new__`
+# has no explicit "which module am I in" argument) instead of the global
+# config -- matching what the production code itself does (e.g. R =
+# k_B.value * N_A.value reads k_B/N_A from its own module's already-
+# executed lines above it, never from a different vintage).
+#
+# Instrumentation point: `Constant.__new__`'s return, dispatched by
+# `abbrev`/`system`, given the constructing module's globals -- each
+# constant is a singleton constructed once at module-import time, so this
+# is a one-shot hook (cheaper than re-checking on every `.si` access, and
+# the sibling family it needs is already fully defined earlier in the same
+# module by construction order).
+
+_V_TOL_DERIVED = 10.0 * _EPS64  # CODATA2018/2022: sigma_sb computed in-repo
+_V_TOL_PUBLISHED = 1e-6  # independently published (2010/2014): ~15x margin over 6.66e-8
+_W_TOL_DERIVED = 10.0 * _EPS64  # R computed in-repo
+_W_TOL_PUBLISHED = 1e-7  # ~14x margin over the observed 7.39e-9/5.47e-9
+_X_TOL = 10.0 * _EPS64  # e_esu/e_emu/e_gauss: exact algebraic identity
+_Y_TOL = 10.0 * _EPS64  # M_x = GM_x/G computed in-repo, exact by construction
+
+# A vintage's sigma_sb/R either equal this exact formula in-repo (CODATA2018,
+# 2022, and any future vintage that keeps computing them this way) or are an
+# independently published literal from an older vintage (2010, 2014, and any
+# vintage not yet seen). Distinguishing regime by vintage *name* does not
+# generalize (the 2010 case proved that: only "2014" was special-cased and
+# 2010 silently fell into the wrong branch) and distinguishing by the
+# observed relerr itself is circular (an earlier, buggier version of this
+# checker did exactly that: "pick the tight tolerance whenever relerr looks
+# small" always fails except at relerr==0, since relerr <= tight_tol can
+# only be true for a value smaller than that same tight_tol). The reliable,
+# non-circular signal astropy already carries is the constant's own
+# `uncertainty` field: derived-in-repo constants (2018/2022's sigma_sb/R)
+# are declared with `uncertainty=0.0` (exact by construction), while
+# independently published literals (2010/2014) carry their real nonzero
+# measurement uncertainty -- confirmed directly against all four vintages'
+# source before use, not merely assumed.
+
+
+@_guard("stefan_boltzmann_formula_consistency")
+def _check_sigma_sb(value, uncertainty, mod):
+    """AP-CONST-001 (Candidate V): sigma_sb == 2*pi^5*k_B^4/(15*h^3*c^2),
+    using h/k_B/c from the *same vintage module* sigma_sb was defined in.
+    """
+    import math
+
+    h = float(mod["h"].value)
+    k_B = float(mod["k_B"].value)
+    c = float(mod["c"].value)
+    formula = 2.0 * math.pi**5 * k_B**4 / (15.0 * h**3 * c**2)
+    relerr = abs(value - formula) / abs(formula)
+    tol = _V_TOL_DERIVED if uncertainty == 0.0 else _V_TOL_PUBLISHED
+    trigger_if(relerr > tol, "AP-CONST-001")
+
+
+@_guard("gas_constant_avogadro_boltzmann")
+def _check_gas_constant(value, uncertainty, mod):
+    """AP-CONST-002 (Candidate W): R == N_A * k_B, same-module siblings."""
+    N_A = float(mod["N_A"].value)
+    k_B = float(mod["k_B"].value)
+    formula = N_A * k_B
+    relerr = abs(value - formula) / abs(formula)
+    tol = _W_TOL_DERIVED if uncertainty == 0.0 else _W_TOL_PUBLISHED
+    trigger_if(relerr > tol, "AP-CONST-002")
+
+
+@_guard("cgs_electron_charge_triplet")
+def _check_cgs_charge(abbrev, system, value, mod):
+    """AP-CONST-003 (Candidate X): e_esu == e_gauss == e*c*10, e_emu ==
+    e/10, using e/c from the same vintage module.
+    """
+    e = float(mod["e"].value)
+    c = float(mod["c"].value)
+    if system in ("esu", "gauss"):
+        formula = e * c * 10.0
+    elif system == "emu":
+        formula = e / 10.0
+    else:
+        return
+    relerr = abs(value - formula) / abs(formula)
+    trigger_if(relerr > _X_TOL, "AP-CONST-003")
+
+
+@_guard("mass_from_gm_over_g")
+def _check_mass_from_gm(abbrev, value, mod):
+    """AP-CONST-004 (Candidate Y): M_x == GM_x / G for Sun/Jupiter/Earth,
+    but only in astro-constant vintages that actually derive mass this way,
+    using GM_x/G from the same vintage module M_x was defined in.
+
+    Precondition gap found during self-verification (not an external
+    audit): the first version always looked up `GM_x` in the global
+    `astropy.constants.config.iaudata` module, regardless of which
+    astro-constant vintage was actually being constructed. `iau2012` (an
+    older, still-selectable vintage) defines `M_sun`/`M_jup`/`M_earth` as
+    direct literals from Allen's Astrophysical Quantities with no `GM_x`
+    at all -- the M=GM/G relation this candidate checks simply does not
+    exist in that vintage, so comparing against a different vintage's
+    unrelated `GM_x` (or, when the global config happened to point at
+    iau2015 while iau2012 was the module actually executing, a genuinely
+    mismatched-vintage GM_x/G pair) produced spurious "disagreements" that
+    reflect two different vintages' independent mass estimates, not a law
+    violation. Fixed by reading `GM_x`/`G` from the constructing module's
+    own namespace and skipping entirely when that module has no `GM_x`
+    sibling, rather than reading a process-wide global.
+    """
+    body = abbrev[2:]  # "M_sun" -> "sun"
+    gm_attr = f"GM_{body}"
+    if gm_attr not in mod or "G" not in mod:
+        return
+    GM = float(mod[gm_attr].value)
+    G = float(mod["G"].value)
+    formula = GM / G
+    relerr = abs(value - formula) / abs(formula)
+    trigger_if(relerr > _Y_TOL, "AP-CONST-004")
+
+
+_CGS_CHARGE_ABBREVS = {"e_esu", "e_emu", "e_gauss"}
+_GM_MASS_ABBREVS = {"M_sun", "M_jup", "M_earth"}
+
+
+def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
+    """Dispatch to the right Candidate V/W/X/Y checker by constant abbrev.
+    Called once per Constant construction (see `Constant.__new__`'s hook);
+    each sub-checker is independently `_guard`-wrapped so one candidate's
+    failure never disturbs another's or production code. ``caller_globals``
+    is the module namespace the constant is actually being constructed in
+    (not a process-wide "active vintage" global, which does not match
+    during standalone imports of a non-default vintage module -- see the
+    note above this function).
+    """
+    try:
+        value = float(value)
+        uncertainty = float(uncertainty)
+    except (TypeError, ValueError):
+        return
+    import math
+
+    if not (math.isfinite(value) and math.isfinite(uncertainty)):
+        return
+    mod = caller_globals
+
+    if abbrev == "sigma_sb" and system == "si":
+        if "h" in mod and "k_B" in mod and "c" in mod:
+            _check_sigma_sb(value, uncertainty, mod)
+    elif abbrev == "R" and system == "si":
+        if "N_A" in mod and "k_B" in mod:
+            _check_gas_constant(value, uncertainty, mod)
+    elif abbrev in _CGS_CHARGE_ABBREVS:
+        if "e" in mod and "c" in mod:
+            _check_cgs_charge(abbrev, system, value, mod)
+    elif abbrev in _GM_MASS_ABBREVS:
+        _check_mass_from_gm(abbrev, value, mod)
