@@ -978,8 +978,33 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 # LAW_CANDIDATES.md Candidate Q. Precondition: >= 5 elements, nonzero MAD
 # (any sign of a). Tolerance: 1e-9 relative, derived from a 100,000-trial
 # sweep (worst relative error 8.46e-14 with |a|, |b| up to 1e6, both signs).
+#
+# Precondition/tolerance correction found by an independent adversarial
+# audit (not self-verification): the un-restricted `b` domain (up to 1e4
+# in magnitude, with no requirement it be commensurate with the rescaled
+# data's own spread) admits a genuinely ill-conditioned regime -- an
+# additive shift that swamps `a*data`'s own spread by many orders of
+# magnitude forces `biweight_midvariance` to recover a tiny residual
+# variance from differences of near-equal, shift-dominated numbers, a
+# catastrophic-cancellation-prone computation whose error does not fit any
+# single eps64-scaled polynomial-in-n model found (tried eps*n, eps*n*cond,
+# eps*n*cond**2 -- none converged to a stable bound; true worst-case flat
+# relative error over the *unrestricted* domain was 2.86e-2, six orders of
+# magnitude past the shipped 1e-9). This is a genuine domain-of-
+# applicability boundary, not amplified rounding -- the same class of gap
+# as Candidate A's pole exclusion and Candidate U's kernel-larger-than-
+# array exclusion. Excluded by precondition: the shift `b` must not exceed
+# `1e3 * |a| * std(data)` (the rescaled data's own spread, computed from
+# the array already in hand, no re-call needed). With this exclusion, a
+# 400,000-trial sweep (n 5-300, data std 1e-14-1e14, |a| up to 1e6, |b| up
+# to 1e6, both `modify_sample_size` values) found a stable worst flat
+# relative error of 9.23e-13 -- consistent with an ordinary few-hundred-ULP
+# accumulation, no residual scale/n dependence. Final: `tol = 1e-9`
+# (~1000x margin over the observed worst case), unchanged from the
+# original value -- the fix is the precondition, not the tolerance.
 
 _Q_TOL = 1e-9
+_Q_SHIFT_RATIO_MAX = 1e3
 
 
 @_guard("biweight_scale_equivariance")
@@ -988,7 +1013,9 @@ def check_biweight_midvariance_equivariance(
 ):
     """AP-STATS-003: biweight_midvariance(a*x + b) == a**2 *
     biweight_midvariance(x) for any real a, b (LAW_CANDIDATES.md
-    Candidate Q). Same argument/re-call pattern as AP-STATS-002.
+    Candidate Q), *provided* the shift b does not swamp a*data's own
+    spread by more than a factor of 1e3 -- see the precondition-correction
+    note above for why this exclusion is required, not merely convenient.
 
     Must forward ``modify_sample_size``: it changes which points count
     toward n (the outlier-rejection mask), so omitting it makes the
@@ -1011,9 +1038,18 @@ def check_biweight_midvariance_equivariance(
     if not (np.isfinite(base) and base > 0):
         return
 
+    arr_std = float(np.std(arr))
+    if not (np.isfinite(arr_std) and arr_std > 0):
+        return
+
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
     a = float(rng.choice([-1.0, 1.0])) * float(rng.uniform(2.0, 1e4))
     b = float(rng.uniform(-1e4, 1e4))
+
+    data_spread = abs(a) * arr_std
+    if abs(b) > _Q_SHIFT_RATIO_MAX * data_spread:
+        return
+
     transformed = a * arr + b
 
     other = biweight_midvariance(
@@ -1042,9 +1078,32 @@ def check_biweight_midvariance_equivariance(
 # (not merely numerically matching it). Tolerance: bias 1e-8 relative to
 # max(|mean|,1); std_err 1e-10 relative -- derived from a 20,000-trial sweep
 # (worst bias 4.95e-12, worst std_err relative error 2.84e-15).
+#
+# std_err tolerance correction found by an independent adversarial audit
+# (not self-verification): the flat `1e-10` relative tolerance false-fired
+# on ~45% of trials once data is centered away from zero with
+# |mean|/std_err >~ 1e5 (e.g. any measurement with a nonzero physical
+# baseline -- a temperature in Kelvin with small variance, a flux with an
+# additive background) -- an ordinary case, not a rare tail event. The
+# original 20,000-trial sweep's claimed "worst std_err relative error
+# 2.84e-15" only held because it never tested offset-dominated data. Root
+# cause: jackknife's per-fold recomputation of np.mean over n-1 points,
+# and this checker's own re-derivation `sum((x-xbar)**2)`, both subtract a
+# large, nearly-equal mean from each point -- a catastrophic-cancellation
+# operation whose absolute error scales with |mean|, not with the
+# quantity of interest (std_err) itself, once |mean| >> std_err. Re-
+# derived as `tol_se = C * eps64 * n * max(1, cond)`,
+# `cond = |mean| / predicted_se` (the ratio that directly captures this
+# cancellation's conditioning): a 150,000-trial sweep (n 2-300, center up
+# to 1e15 in magnitude, scale spanning 1e-12 to 1e12) found a stable worst
+# ratio of 0.46 with no growth as center/scale widened further. The bias
+# check needed no correction -- swept identically across the same
+# magnitude range, its worst bias/scale ratio stayed a stable ~4e-14 with
+# no cancellation-driven growth, since jackknife's bias formula for the
+# mean is an exact algebraic zero regardless of centering.
 
 _R_BIAS_TOL = 1e-8
-_R_SE_TOL = 1e-10
+_R_SE_TOL_C = 5.0
 
 
 @_guard("jackknife_mean_closed_form")
@@ -1083,8 +1142,12 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     trigger_if(abs(bias_val) / bias_scale > _R_BIAS_TOL, "AP-STATS-004")
 
     predicted_se = math.sqrt(float(np.sum((arr - xbar) ** 2)) / (n * (n - 1)))
-    se_relerr = abs(se_val - predicted_se) / max(abs(predicted_se), 1e-300)
-    trigger_if(se_relerr > _R_SE_TOL, "AP-STATS-004")
+    if predicted_se <= 0.0 or not math.isfinite(predicted_se):
+        return
+    se_relerr = abs(se_val - predicted_se) / predicted_se
+    cond = abs(xbar) / predicted_se
+    tol_se = _R_SE_TOL_C * _EPS64 * n * max(1.0, cond)
+    trigger_if(se_relerr > tol_se, "AP-STATS-004")
 
 
 # --- Candidate S: kernel normalization exactness ----------------------------
@@ -1108,18 +1171,46 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
 # passing the pre-normalization sum and excluding the zero-sum case by
 # precondition, matching the exclusion already stated in the design doc
 # but not actually wired into the checker's call site.
+#
+# Tolerance correction found by an independent adversarial audit (not
+# self-verification): a flat `10*eps64` was falsified outright -- a clean
+# 3,000-trial sweep of ordinary (non-adversarial) CustomKernel arrays of
+# unit-Gaussian noise found 100% of trials exceeding it, with the original
+# design-doc sweep's "worst case 2*eps64, no size dependence" claim simply
+# wrong (that sweep only exercised the built-in, closed-form, symmetric
+# kernel shapes -- Gaussian1DKernel, Box1DKernel, etc. -- a materially
+# narrower domain than the precondition the checker actually enforces).
+# Re-derived from first principles: summing n post-division float64 values
+# is an n-term resummation whose rounding floor is set both by n (ordinary
+# accumulation) and by the conditioning of the division itself -- how
+# close the pre-normalization sum is to being swamped by cancellation
+# among the array's own elements, `cond = sum(|arr|) / |pre_sum|` (the
+# textbook condition number of the reduction that produced pre_sum). A
+# 300,000-trial sweep (n in [3,300], ordinary unit-Gaussian arrays plus an
+# adversarial near-zero-pre-sum-via-cancellation variant every 5th trial)
+# found `err / (eps64 * n * cond)` bounded at a stable worst case of
+# 0.333, with no growth as n or cond increased across either the ordinary
+# or adversarial sub-sweep -- confirmed `n` is load-bearing (dropping it
+# and using `cond` alone gave a *worse*, unstable worst ratio of 1.62).
+# Final: `tol = 10 * eps64 * n * cond` (~30x margin over the observed
+# worst ratio).
 
-_S_TOL = 10.0 * _EPS64
+_S_TOL_C = 10.0
 
 
 @_guard("kernel_normalization_exactness")
-def check_kernel_normalization(mode, pre_sum, array_sum):
+def check_kernel_normalization(mode, pre_sum, array_sum, abs_sum, size):
     """AP-CONV-001: after Kernel.normalize(mode='integral'), the array must
     sum to 1 to float64 rounding (LAW_CANDIDATES.md Candidate S), *provided*
     the pre-normalization sum was actually nonzero (the zero-sum case is
     production code's own documented skip-division branch, not part of
     this law -- see the zero-sum note above). Reads values already
     computed by production code -- no re-call needed.
+
+    ``abs_sum`` is sum(abs(array)) *before* normalization and ``size`` is
+    the array's element count -- both used only to compute the tolerance
+    (division condition number and accumulation term), never to re-derive
+    the scientific quantity itself.
     """
     import math
 
@@ -1127,9 +1218,13 @@ def check_kernel_normalization(mode, pre_sum, array_sum):
         return
     if not (math.isfinite(pre_sum) and pre_sum != 0.0):
         return
-    if not math.isfinite(array_sum):
+    if not (math.isfinite(array_sum) and math.isfinite(abs_sum) and abs_sum > 0.0):
         return
-    trigger_if(abs(array_sum - 1.0) > _S_TOL, "AP-CONV-001")
+    if size < 1:
+        return
+    cond = abs_sum / abs(pre_sum)
+    tol = _S_TOL_C * _EPS64 * size * cond
+    trigger_if(abs(array_sum - 1.0) > tol, "AP-CONV-001")
 
 
 # --- Candidate T: flux conservation under convolution, wrap boundary -------
@@ -1425,13 +1520,31 @@ def _check_mass_from_gm(abbrev, value, mod):
     violation. Fixed by reading `GM_x`/`G` from the constructing module's
     own namespace and skipping entirely when that module has no `GM_x`
     sibling, rather than reading a process-wide global.
+
+    Second gap found by an independent adversarial audit (not
+    self-verification): `iau2015.py` never binds a bare `G` name -- it
+    does `from .config import codata` and reads `codata.G` throughout, so
+    `"G" not in mod` was vacuously True for the only vintage this law
+    applies to, making the checker dead code against the real codebase
+    (confirmed by a positive control: injecting a wildly wrong M_sun into
+    the real iau2015 module produced zero triggers). Fixed by also
+    accepting `G` via a `codata` module object bound in the constructing
+    module's namespace, matching iau2015.py's actual style instead of
+    assuming every vintage module binds formula ingredients as bare names.
     """
     body = abbrev[2:]  # "M_sun" -> "sun"
     gm_attr = f"GM_{body}"
-    if gm_attr not in mod or "G" not in mod:
+    if gm_attr not in mod:
         return
+    if "G" in mod:
+        g_const = mod["G"]
+    else:
+        codata_mod = mod.get("codata")
+        g_const = getattr(codata_mod, "G", None)
+        if g_const is None:
+            return
     GM = float(mod[gm_attr].value)
-    G = float(mod["G"].value)
+    G = float(g_const.value)
     formula = GM / G
     relerr = abs(value - formula) / abs(formula)
     trigger_if(relerr > _Y_TOL, "AP-CONST-004")

@@ -114,6 +114,9 @@ class Kernel:
         else:
             raise ValueError("invalid mode, must be 'integral' or 'peak'")
 
+        _pre_abs_sum = np.abs(self._array).sum()
+        _pre_size = self._array.size
+
         # Warn the user for kernels that sum to zero
         if normalization == 0:
             warnings.warn(
@@ -128,7 +131,11 @@ class Kernel:
         if _scientific_checkers.enabled():
             try:
                 _scientific_checkers.check_kernel_normalization(
-                    mode, float(normalization), float(self._kernel_sum)
+                    mode,
+                    float(normalization),
+                    float(self._kernel_sum),
+                    float(_pre_abs_sum),
+                    int(_pre_size),
                 )
             except Exception:
                 pass
