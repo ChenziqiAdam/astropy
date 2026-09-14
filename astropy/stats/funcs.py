@@ -937,7 +937,17 @@ def mad_std(
     """
     # NOTE: 1. / scipy.stats.norm.ppf(0.75) = 1.482602218505602
     MAD = median_absolute_deviation(data, axis=axis, func=func, ignore_nan=ignore_nan)
-    return MAD * 1.482602218505602
+    result = MAD * 1.482602218505602
+
+    from astropy import _scientific_checkers
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_mad_std_scale_factor(result, MAD)
+        except Exception:
+            pass
+
+    return result
 
 
 def signal_to_noise_oir_ccd(

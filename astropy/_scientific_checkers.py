@@ -1931,3 +1931,49 @@ def check_spherical_differential_coslat_roundtrip(
 
     relerr = float(max(np.max(r_lon), np.max(r_lat), np.max(r_dist)))
     trigger_if(relerr > _AE_TOL_EPS, "AP-COORD-006")
+
+
+# --- Candidate AF: cross-module MAD-to-std scale factor consistency --------
+#
+# LAW_CANDIDATES.md Candidate AF. Precondition: none (a hardcoded literal
+# comparison, not data-dependent). Zero tolerance -- both literals are
+# independently typed decimal approximations of the identical mathematical
+# constant 1/Phi^-1(3/4), and confirmed to round to the exact same float64
+# value; this is the same "two independently-typed literals could drift
+# under an uncoordinated edit" pattern as the AP-CONST-* family, just for a
+# statistical rather than physical constant, and spanning two different
+# subsystems (astropy.stats and astropy.uncertainty) rather than two CODATA
+# vintage modules.
+
+@_guard("mad_std_scale_factor_consistency")
+def check_mad_std_scale_factor(mad_std_result, mad_value):
+    """AP-STATS-005 (Candidate AF): astropy.stats.mad_std's hardcoded scale
+    factor (MAD * 1.482602218505602) must equal
+    astropy.uncertainty.core.SMAD_SCALE_FACTOR (1.48260221850560203193936...)
+    -- both are independently-typed decimal literals for 1/Phi^-1(3/4), in
+    two different subsystems, that could silently drift apart under an
+    edit to only one of them.
+
+    Compares MAD*SMAD_SCALE_FACTOR (recomputed with the *other* module's
+    literal) directly against mad_std's own MAD*1.482602218505602, rather
+    than dividing mad_std_result back by MAD -- an earlier version did
+    that division and found spurious eps64-scale disagreement purely from
+    the round-trip's own rounding noise (x*C/x != C exactly in float64),
+    which was never a real drift between the two literals.
+    """
+    import numpy as np
+
+    from astropy.uncertainty.core import SMAD_SCALE_FACTOR
+
+    mad_arr = np.asarray(mad_value)
+    if not np.all(np.isfinite(mad_arr)):
+        return
+    result_arr = np.asarray(mad_std_result)
+    if not np.all(np.isfinite(result_arr)):
+        return
+
+    reference = mad_arr * SMAD_SCALE_FACTOR
+    trigger_if(
+        bool(np.any(result_arr != reference)),
+        "AP-STATS-005",
+    )
