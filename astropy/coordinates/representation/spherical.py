@@ -1085,7 +1085,21 @@ class SphericalDifferential(BaseSphericalDifferential):
         elif issubclass(other_class, RadialDifferential):
             return other_class(self.d_distance)
         elif issubclass(other_class, SphericalCosLatDifferential):
-            return other_class(self._d_lon_coslat(base), self.d_lat, self.d_distance)
+            coslat_result = other_class(
+                self._d_lon_coslat(base), self.d_lat, self.d_distance
+            )
+
+            from astropy import _scientific_checkers
+
+            if _scientific_checkers.enabled():
+                try:
+                    _scientific_checkers.check_spherical_differential_coslat_roundtrip(
+                        self, base, coslat_result
+                    )
+                except Exception:
+                    pass
+
+            return coslat_result
         elif issubclass(other_class, UnitSphericalCosLatDifferential):
             return other_class(self._d_lon_coslat(base), self.d_lat)
         elif issubclass(other_class, PhysicsSphericalDifferential):

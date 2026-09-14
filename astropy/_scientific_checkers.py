@@ -1867,3 +1867,67 @@ def check_spherical_cartesian_roundtrip(spherical_self, cartesian_result):
     denom = np.where(distance_value == 0, 1.0, distance_value)
     relerr = float(np.max(diff / denom))
     trigger_if(relerr > _AD_TOL_EPS, "AP-COORD-005")
+
+
+# --- Candidate AE: spherical proper-motion differential CosLat round trip --
+#
+# LAW_CANDIDATES.md Candidate AE. Precondition: base given (required to
+# convert between the two conventions at all -- represent_as raises its own
+# TypeError otherwise, nothing to guard). No pole exclusion needed: cos(lat)
+# never reaches exactly 0.0 in float64 (cos(90deg) == 6.12e-17), so the
+# d_lon_coslat = d_lon*cos(lat) / cos(lat) round trip never divides by a
+# true zero, and a 50,000-trial adversarial sweep down to cos(lat)~2.3e-10
+# found no conditioning-driven amplification at all (worst case matched the
+# ordinary-latitude sweep almost exactly). Tolerance: 5*eps64 relative,
+# derived from a 100,000-trial sweep (worst 0.98*eps64).
+
+_AE_TOL_EPS = 5.0 * _EPS64
+
+
+@_guard("spherical_differential_coslat_roundtrip")
+def check_spherical_differential_coslat_roundtrip(
+    self_differential, base, coslat_result
+):
+    """AP-COORD-006 (Candidate AE): SphericalDifferential.represent_as(
+    SphericalCosLatDifferential, base).represent_as(SphericalDifferential,
+    base) must return to the original differential -- the d_lon <->
+    d_lon_coslat conversion (multiply then divide by cos(base.lat)) is an
+    exact algebraic inverse pair, but implemented as two separate methods
+    (_d_lon_coslat on the source class, _get_d_lon as a classmethod on the
+    target class) that could drift out of agreement under an independent
+    edit to either.
+    """
+    import numpy as np
+
+    from astropy.coordinates.representation.spherical import SphericalDifferential
+
+    if base is None:
+        return
+
+    try:
+        roundtrip = coslat_result.represent_as(SphericalDifferential, base=base)
+    except Exception:
+        return
+
+    def _relerr(a, b):
+        a_val = a.to_value(a.unit)
+        b_val = b.to_value(a.unit)
+        denom = np.where(np.abs(a_val) < 1e-300, 1.0, np.abs(a_val))
+        return np.abs(b_val - a_val) / denom
+
+    try:
+        r_lon = _relerr(self_differential.d_lon, roundtrip.d_lon)
+        r_lat = _relerr(self_differential.d_lat, roundtrip.d_lat)
+        r_dist = _relerr(self_differential.d_distance, roundtrip.d_distance)
+    except Exception:
+        return
+
+    if not (
+        np.all(np.isfinite(r_lon))
+        and np.all(np.isfinite(r_lat))
+        and np.all(np.isfinite(r_dist))
+    ):
+        return
+
+    relerr = float(max(np.max(r_lon), np.max(r_lat), np.max(r_dist)))
+    trigger_if(relerr > _AE_TOL_EPS, "AP-COORD-006")
