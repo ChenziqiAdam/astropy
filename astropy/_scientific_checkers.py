@@ -1553,6 +1553,33 @@ def _check_mass_from_gm(abbrev, value, mod):
 _CGS_CHARGE_ABBREVS = {"e_esu", "e_emu", "e_gauss"}
 _GM_MASS_ABBREVS = {"M_sun", "M_jup", "M_earth"}
 
+# --- Candidate AH: Bohr magneton cross-constant relation --------------------
+#
+# LAW_CANDIDATES.md Candidate AH. muB = e*hbar/(2*m_e) using e/hbar/m_e from
+# the same CODATA vintage module muB was defined in -- muB is an
+# independently-published literal (nonzero uncertainty in every vintage), so
+# this uses the published-literal tolerance regime, not the derived-in-repo
+# 10*eps64 regime (unlike sigma_sb/R/e_esu-family/M_x, muB is never
+# constructed with uncertainty==0.0 in any vintage inspected).
+
+_AH_TOL = 1e-9
+
+
+@_guard("bohr_magneton_from_e_hbar_me")
+def _check_bohr_magneton(value, mod):
+    """AP-CONST-005 (Candidate AH): muB == e*hbar/(2*m_e), using e/hbar/m_e
+    from the constructing module's own namespace (same discipline as
+    AP-CONST-001/002/004 -- never a process-wide "active vintage" global).
+    """
+    if not ("e" in mod and "hbar" in mod and "m_e" in mod):
+        return
+    e_val = float(mod["e"].value)
+    hbar_val = float(mod["hbar"].value)
+    m_e_val = float(mod["m_e"].value)
+    formula = e_val * hbar_val / (2.0 * m_e_val)
+    relerr = abs(value - formula) / abs(formula)
+    trigger_if(relerr > _AH_TOL, "AP-CONST-005")
+
 
 def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
     """Dispatch to the right Candidate V/W/X/Y checker by constant abbrev.
@@ -1586,6 +1613,8 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
             _check_cgs_charge(abbrev, system, value, mod)
     elif abbrev in _GM_MASS_ABBREVS:
         _check_mass_from_gm(abbrev, value, mod)
+    elif abbrev == "muB" and system == "si":
+        _check_bohr_magneton(value, mod)
 
 
 # --- Candidate Z: Lomb-Scargle cross-implementation agreement ---------------
