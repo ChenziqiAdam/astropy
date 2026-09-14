@@ -20,6 +20,7 @@ import warnings
 
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy.utils.exceptions import AstropyUserWarning
 
 from .utils import (
@@ -123,6 +124,14 @@ class Kernel:
             np.divide(self._array, normalization, self._array)
 
         self._kernel_sum = self._array.sum()
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_kernel_normalization(
+                    mode, float(normalization), float(self._kernel_sum)
+                )
+            except Exception:
+                pass
 
     @property
     def shape(self):

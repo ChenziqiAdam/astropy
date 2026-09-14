@@ -1085,3 +1085,207 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     predicted_se = math.sqrt(float(np.sum((arr - xbar) ** 2)) / (n * (n - 1)))
     se_relerr = abs(se_val - predicted_se) / max(abs(predicted_se), 1e-300)
     trigger_if(se_relerr > _R_SE_TOL, "AP-STATS-004")
+
+
+# --- Candidate S: kernel normalization exactness ----------------------------
+#
+# LAW_CANDIDATES.md Candidate S. Precondition: mode='integral', pre-
+# normalization sum finite and nonzero. Tolerance: 10 * eps64, derived from a
+# 72-kernel sweep across all 11 built-in shapes (worst truncation 4.44e-16 =
+# 2*eps64, no size dependence found from n~9 to n~400).
+#
+# Zero-sum precondition gap found during self-verification (not an
+# external audit): the first version only received the post-normalize()
+# sum, not whether a division actually happened. `Kernel.normalize` has an
+# explicit branch (production code, not a bug) that skips the division
+# entirely when the pre-normalization sum is exactly zero -- warning and
+# leaving the array un-normalized, per its own docstring/tests
+# (test_custom_1D_kernel_zerosum: array [-2,-1,0,1,2] sums to exactly 0,
+# `custom.truncation == 1.0` is the *documented correct* outcome). Without
+# the pre-normalization sum, the checker could not distinguish this
+# documented skip-division branch from a real off-by-something in the
+# divide -- both produce a "sum far from 1" observation. Fixed by also
+# passing the pre-normalization sum and excluding the zero-sum case by
+# precondition, matching the exclusion already stated in the design doc
+# but not actually wired into the checker's call site.
+
+_S_TOL = 10.0 * _EPS64
+
+
+@_guard("kernel_normalization_exactness")
+def check_kernel_normalization(mode, pre_sum, array_sum):
+    """AP-CONV-001: after Kernel.normalize(mode='integral'), the array must
+    sum to 1 to float64 rounding (LAW_CANDIDATES.md Candidate S), *provided*
+    the pre-normalization sum was actually nonzero (the zero-sum case is
+    production code's own documented skip-division branch, not part of
+    this law -- see the zero-sum note above). Reads values already
+    computed by production code -- no re-call needed.
+    """
+    import math
+
+    if mode != "integral":
+        return
+    if not (math.isfinite(pre_sum) and pre_sum != 0.0):
+        return
+    if not math.isfinite(array_sum):
+        return
+    trigger_if(abs(array_sum - 1.0) > _S_TOL, "AP-CONV-001")
+
+
+# --- Candidate T: flux conservation under convolution, wrap boundary -------
+#
+# LAW_CANDIDATES.md Candidate T. Precondition: boundary='wrap',
+# normalize_kernel=True, no mask, finite non-NaN input. Tolerance:
+# 30 * eps64 * sqrt(array.size), floored at 50 * eps64, relative to
+# max(1, max(|array|)) -- corrected during self-verification (see note
+# below) from an initial flat-constant / sum-normalized guess that a
+# 6000-trial mixed 1D/2D sweep found both under- and mis-scaled.
+#
+# Normalization/scaling correction found during self-verification (not an
+# external audit): the first version normalized by max(1, |array.sum()|)
+# and used a flat tolerance. A realistic sweep (Gaussian-noise arrays with
+# per-trial magnitude scaled across 13 orders of magnitude, boundary='wrap')
+# found a false-positive-triggering case: an array whose elements were
+# individually large (max|a| ~ 520) but whose *sum* happened to be small
+# (~9.9, from sign cancellation) -- the true summation round-off (~1e-13)
+# was tiny relative to max|a| (~1*eps64) but large relative to the
+# accidentally-small sum (~50*eps64, tripping the old flat tolerance).
+# Fixed by normalizing against max(1, max(|array|)) instead (matching
+# Candidate U's own scale choice) -- the physically meaningful error floor
+# for an O(n)-element summation is set by the elements' magnitude, not by
+# a sum that can be arbitrarily small through cancellation. A second,
+# independent effect was then found: with the corrected normalization, the
+# worst-case ratio grows with array size (2D worst 99*eps64 over 2000
+# trials, vs 1D worst ~25*eps64) -- consistent with an O(sqrt(n)*eps64)
+# random-walk accumulation model for an n-element reduction. Re-derived
+# against ratio/sqrt(array.size), which stayed bounded at 2.88 over 6000
+# mixed 1D/2D trials (sizes up to 500 in 1D, 150x150 in 2D, 13 orders of
+# input magnitude, Gaussian and Box kernels) -- confirming the family
+# variable was array size, not a fixed constant. Final: 30*eps64*sqrt(size)
+# (~10x margin), floored at 50*eps64 so small arrays keep a sane minimum.
+
+_T_TOL_C = 30.0
+_T_TOL_FLOOR = 50.0 * _EPS64
+
+
+@_guard("convolution_flux_conservation")
+def check_convolution_flux_conservation(
+    array_internal, result, boundary, normalize_kernel, nan_treatment, mask
+):
+    """AP-CONV-002: convolve(array, kernel, boundary='wrap',
+    normalize_kernel=True).sum() == array.sum() (LAW_CANDIDATES.md
+    Candidate T). Reads the production array/result already computed by
+    ``convolve`` -- no re-call needed, this is a conservation law on the
+    single production call's own input/output pair.
+    """
+    import math
+
+    import numpy as np
+
+    if boundary != "wrap" or not normalize_kernel or mask is not None:
+        return
+    arr = np.asarray(array_internal)
+    if not np.all(np.isfinite(arr)):
+        return
+    res = np.asarray(result)
+    if not np.all(np.isfinite(res)):
+        return
+
+    before = float(arr.sum())
+    after = float(res.sum())
+    scale = max(1.0, float(np.max(np.abs(arr), initial=0.0)))
+    tol = max(_T_TOL_FLOOR, _T_TOL_C * _EPS64 * math.sqrt(arr.size))
+    trigger_if(abs(after - before) > tol * scale, "AP-CONV-002")
+
+
+# --- Candidate U: convolve vs convolve_fft cross-implementation agreement --
+#
+# LAW_CANDIDATES.md Candidate U. Precondition: finite non-NaN input,
+# boundary in {'fill', 'wrap'}, normalize_kernel=True, kernel not larger
+# than the array in any axis, input size below a cheap-to-recompute
+# threshold (bounds checker overhead per SANITIZER.md 5.5). Tolerance:
+# 50 * eps64 relative to max(1, max(|array|)), derived from sweeps up to
+# 600 trials per boundary/kernel-shape/NaN-fraction combination (worst
+# 3.26*eps64, the NaN-interpolation case).
+#
+# Kernel-larger-than-array exclusion found during self-verification (not
+# an external audit): a 200-trial randomized sweep found convolve() and
+# convolve_fft() disagree by O(1) (not O(eps64)) whenever the kernel size
+# exceeds the array size in `boundary='wrap'` mode -- confirmed sharp at
+# the exact boundary (kernel size == array size: diff 2.2e-13, agrees;
+# kernel size == array size + 2: diff 1.97, real O(1) disagreement). Root
+# cause: `convolve`'s direct C path pads the array via `np.pad(...,
+# mode='wrap')` with `pad_width = kernel_shape // 2`, which only wraps in
+# one copy of the array on each side; `convolve_fft`'s FFT-domain circular
+# convolution implicitly assumes a period equal to its padded transform
+# size. When the kernel's reach exceeds the array's own extent, the two
+# padding/periodicity conventions are no longer computing the same
+# mathematical operation -- a genuine domain-of-applicability boundary
+# (`convolve`'s own docstring only forbids this for `boundary=None`, not
+# 'wrap'/'fill'/'extend'), not amplified rounding. Excluded by precondition
+# rather than loosening the tolerance, per SANITIZER.md 5.7/CSC precedent.
+
+_U_TOL = 50.0 * _EPS64
+_U_MAX_SIZE = 4096
+
+
+@_guard("convolution_cross_implementation_agreement")
+def check_convolution_cross_implementation(
+    array_internal,
+    kernel_internal,
+    result,
+    boundary,
+    fill_value,
+    nan_treatment,
+    normalize_kernel,
+    mask,
+):
+    """AP-CONV-003: convolve() and convolve_fft() must agree to float64
+    rounding on the same input (LAW_CANDIDATES.md Candidate U). This is the
+    one candidate in this bank whose re-derivation calls a genuinely
+    different public API rather than the same one on a transformed input,
+    since the law is inherently about cross-implementation agreement.
+    Forwards every result-affecting argument the two functions share
+    (differential-test contract, arg-forwarding class) and skips inputs
+    outside either function's shared, swept domain.
+    """
+    import numpy as np
+
+    from astropy.convolution.convolve import convolve_fft
+
+    if boundary not in ("fill", "wrap") or not normalize_kernel or mask is not None:
+        return
+    arr = np.asarray(array_internal)
+    ker = np.asarray(kernel_internal)
+    if arr.size == 0 or arr.size > _U_MAX_SIZE:
+        return
+    if arr.ndim != ker.ndim or any(ks > as_ for ks, as_ in zip(ker.shape, arr.shape)):
+        return
+    if not np.all(np.isfinite(ker)):
+        return
+    if not (np.all(np.isfinite(arr)) or nan_treatment == "interpolate"):
+        return
+
+    try:
+        fft_result = convolve_fft(
+            arr,
+            ker,
+            boundary=boundary,
+            fill_value=fill_value,
+            nan_treatment=nan_treatment,
+            normalize_kernel=normalize_kernel,
+        )
+    except Exception:
+        return
+
+    res = np.asarray(result)
+    fft_res = np.asarray(fft_result)
+    if res.shape != fft_res.shape:
+        return
+    finite_mask = np.isfinite(res) & np.isfinite(fft_res)
+    if not np.any(finite_mask):
+        return
+
+    diff = np.max(np.abs(res[finite_mask] - fft_res[finite_mask]))
+    scale = max(1.0, float(np.max(np.abs(arr[np.isfinite(arr)]), initial=0.0)))
+    trigger_if(float(diff) > _U_TOL * scale, "AP-CONV-003")

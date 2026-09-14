@@ -5,6 +5,7 @@ from functools import partial
 
 import numpy as np
 
+from astropy import _scientific_checkers
 from astropy import units as u
 from astropy.modeling.convolution import Convolution
 from astropy.modeling.core import SPECIAL_OPERATORS, CompoundModel
@@ -445,6 +446,27 @@ def convolve(
 
     if preserve_nan:
         result[initially_nan] = np.nan
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_convolution_flux_conservation(
+                array_internal, result, boundary, normalize_kernel, nan_treatment, mask
+            )
+        except Exception:
+            pass
+        try:
+            _scientific_checkers.check_convolution_cross_implementation(
+                array_internal,
+                kernel_internal,
+                result,
+                boundary,
+                fill_value,
+                nan_treatment,
+                normalize_kernel,
+                mask,
+            )
+        except Exception:
+            pass
 
     # Convert result to original data type
     array_unit = getattr(passed_array, "unit", None)
