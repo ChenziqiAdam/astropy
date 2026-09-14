@@ -452,6 +452,15 @@ def doppler_optical(rest):
         si.Hz: lambda x: rest_in(si.Hz) / (1 + x / ckms),
         si.AA: lambda x: rest_in(si.AA) * (1 + x / ckms),
     }
+
+    if _scientific_checkers.enabled():
+        try:
+            _scientific_checkers.check_doppler_optical_convention_agreement(
+                rest_in(si.Hz), to_funcs[si.Hz]
+            )
+        except Exception:
+            pass
+
     return Equivalency(
         [
             (unit, km_per_s, to_func, from_funcs[unit])

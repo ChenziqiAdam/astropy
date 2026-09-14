@@ -1977,3 +1977,67 @@ def check_mad_std_scale_factor(mad_std_result, mad_value):
         bool(np.any(result_arr != reference)),
         "AP-STATS-005",
     )
+
+
+# --- Candidate AG: optical vs relativistic Doppler convention consistency --
+#
+# LAW_CANDIDATES.md Candidate AG. Precondition and tolerance derivation
+# mirror Candidate I (AP-UNITS-002) exactly, since it is the same analytical
+# structure applied to the third Doppler convention: |beta| in
+# (1e-5, 1e-3), same leading-order Taylor argument. Analytically,
+# V_opt/c = sqrt((1+beta)/(1-beta)) - 1 = beta + beta^2/2 + O(beta^3), so
+# (V_opt - V_rel)/V_rel = beta/2 + O(beta^2) at leading order -- the same
+# magnitude as radio's beta/2 term (AP-UNITS-002), consistent with optical
+# and radio being symmetric first-order over/under-estimates of the exact
+# relativistic formula. A 20,000-trial-per-rest-type sweep (4 rest
+# quantities: GHz, nm, eV, cm) found the residual after subtracting beta/2
+# matches the predicted next O(beta^2) term, worst 5.00e-7, with no
+# unexplained excess. Tolerance: 1e-6, same value and same ~2x margin as
+# AP-UNITS-002.
+
+_AG_BETA_MIN = 1e-5
+_AG_BETA_MAX = 1e-3
+_AG_TOL = 1e-6
+
+
+@_guard("doppler_optical_convention_consistency")
+def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz):
+    """AP-UNITS-006 (Candidate AG): the optical and relativistic Doppler
+    conventions must disagree by exactly beta/2 in relative terms at
+    leading order (V_opt/c = sqrt((1+beta)/(1-beta)) - 1, an analytically
+    derived prediction) -- see LAW_CANDIDATES.md Candidate AG.
+
+    ``rest_freq_hz`` is the rest frequency (plain float, Hz) doppler_optical
+    was constructed with; ``to_func_optical_hz`` is doppler_optical's own
+    Hz -> km/s conversion function for that rest frequency. Re-calls the
+    public doppler_relativistic(rest) to get the independent relativistic
+    conversion for the same rest frequency, then probes both at a small
+    set of nearby test frequencies spanning the beta precondition window.
+    """
+    from astropy import units as u
+    from astropy.units.equivalencies import doppler_relativistic
+
+    rest_q = rest_freq_hz * u.Hz
+    rel_equiv = doppler_relativistic(rest_q)
+    to_func_rel_hz = None
+    for row in rel_equiv:
+        if len(row) >= 3 and row[0] == u.Hz:
+            to_func_rel_hz = row[2]
+            break
+    if to_func_rel_hz is None:
+        return
+
+    for beta_probe in (1e-4, 3e-4, 1e-3 * 0.9):
+        test_freq = rest_freq_hz * (1 - beta_probe)
+        v_opt = to_func_optical_hz(test_freq)
+        v_rel = to_func_rel_hz(test_freq)
+
+        beta = v_rel / _CKMS
+        if not (_AG_BETA_MIN < abs(beta) < _AG_BETA_MAX):
+            continue
+        if v_rel == 0:
+            continue
+
+        observed_relerr = (v_opt - v_rel) / v_rel
+        predicted = 0.5 * abs(beta)
+        trigger_if(abs(observed_relerr - predicted) > _AG_TOL, "AP-UNITS-006")
