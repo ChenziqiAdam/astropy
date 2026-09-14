@@ -2270,3 +2270,76 @@ def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
 
     abserr = float(np.max(np.abs(x_back - x_arr)))
     trigger_if(abserr > _AL_TOL_ABS, "AP-VIS-003")
+
+
+# --- Candidate AM: geodetic <-> geocentric Cartesian round trip -------------
+#
+# LAW_CANDIDATES.md Candidate AM. EarthLocation.to_geodetic converts
+# geocentric XYZ to geodetic lon/lat/height via ERFA's gc2gde (an
+# ellipsoid-inversion algorithm distinct from the closed-form gd2gce used
+# in the forward direction, from_geodetic) -- a genuine two-independently-
+# computed-algorithm round trip, comparable in trust level to this bank's
+# other ERFA-backed checks (AP-WCS-001). Compared in Cartesian space (same
+# convention as AP-COORD-005) to sidestep angle-wrap and pole-degeneracy
+# entirely, rather than comparing lon/lat/height component-wise.
+#
+# Precondition: finite geocentric position AND geocentric radius >=
+# 4,000,000 m. Found necessary during verification, not anticipated in the
+# original design: astropy's own test_frames.py::test_eloc_attributes
+# deliberately constructs a location 1 km from Earth's *center*
+# (`ITRS(SphericalRepresentation(..., distance=1*u.km))`, documented in
+# that test as expecting `height < -6000*u.km`) and the round-trip error
+# there was 9491 m -- gc2gde's ellipsoid inversion is ill-conditioned near
+# the coordinate origin, where the geodetic latitude/height decomposition
+# itself becomes numerically degenerate (same class of issue as this
+# bank's pole exclusions elsewhere, but for radius instead of latitude). A
+# radius sweep found the error decays smoothly and monotonically toward
+# Earth's surface (0.25 m at 1000 km, 3.3e-4 m at 4000 km, ~1e-8 m at the
+# true 6357 km surface) with no sharp cutoff, so a generous
+# floor was chosen well below Earth's actual surface: a 30,000-trial sweep
+# for radius in [4e6, 4e10] m (4000 km out past GEO and beyond) found
+# worst distance 1.6e-3 m, ~6x margin under tolerance.
+
+_AM_TOL_M = 1e-2  # 1 cm, ~6x margin over the 1.6mm worst observed
+_AM_MIN_RADIUS_M = 4.0e6
+
+
+@_guard("geodetic_geocentric_roundtrip")
+def check_geodetic_roundtrip(ellipsoid, x, y, z, lon, lat, height):
+    """AP-COORD-007 (Candidate AM): EarthLocation.to_geodetic's own
+    lon/lat/height, converted back to geocentric Cartesian coordinates via
+    from_geodetic (a separately-computed closed-form, ERFA's gd2gce), must
+    recover the original (x, y, z) EarthLocation.to_geodetic itself was
+    called on -- x, y, z are the original position (already computed by
+    production code); only the reverse conversion is computed here.
+    """
+    import numpy as np
+
+    from astropy import units as u
+    from astropy.coordinates.earth import EarthLocation
+
+    x_arr = np.asarray(x.to_value(u.m))
+    y_arr = np.asarray(y.to_value(u.m))
+    z_arr = np.asarray(z.to_value(u.m))
+    if not (
+        np.all(np.isfinite(x_arr))
+        and np.all(np.isfinite(y_arr))
+        and np.all(np.isfinite(z_arr))
+    ):
+        return
+
+    radius = np.sqrt(x_arr**2 + y_arr**2 + z_arr**2)
+    if np.any(radius < _AM_MIN_RADIUS_M):
+        return
+
+    back = EarthLocation.from_geodetic(lon, lat, height, ellipsoid=ellipsoid)
+    xb = np.asarray(back.x.to_value(u.m))
+    yb = np.asarray(back.y.to_value(u.m))
+    zb = np.asarray(back.z.to_value(u.m))
+    if not (
+        np.all(np.isfinite(xb)) and np.all(np.isfinite(yb)) and np.all(np.isfinite(zb))
+    ):
+        return
+
+    dist = float(np.max(np.sqrt((xb - x_arr) ** 2 + (yb - y_arr) ** 2 + (zb - z_arr) ** 2)))
+    trigger_if(dist > _AM_TOL_M, "AP-COORD-007")

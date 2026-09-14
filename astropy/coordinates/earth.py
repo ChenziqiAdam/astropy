@@ -604,11 +604,22 @@ class EarthLocation(u.Quantity):
         llh = CartesianRepresentation(xyz, xyz_axis=-1, copy=False).represent_as(
             ELLIPSOIDS[ellipsoid]
         )
-        return GeodeticLocation(
-            Longitude(llh.lon, u.deg, wrap_angle=180 * u.deg, copy=False),
-            llh.lat << u.deg,
-            llh.height << self.unit,
-        )
+        result_lon = Longitude(llh.lon, u.deg, wrap_angle=180 * u.deg, copy=False)
+        result_lat = llh.lat << u.deg
+        result_height = llh.height << self.unit
+
+        from astropy import _scientific_checkers
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_geodetic_roundtrip(
+                    ellipsoid, self.x, self.y, self.z,
+                    result_lon, result_lat, result_height,
+                )
+            except Exception:
+                pass
+
+        return GeodeticLocation(result_lon, result_lat, result_height)
 
     @property
     def lon(self):
