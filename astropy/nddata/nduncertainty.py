@@ -402,7 +402,21 @@ class NDUncertainty(metaclass=ABCMeta):
             # assume this is a collapsing operation:
             result = self._propagate_collapse(operation, axis)
 
-        return self.__class__(array=result, copy=False)
+        result_uncertainty = self.__class__(array=result, copy=False)
+
+        if other_nddata is not None:
+            from astropy import _scientific_checkers
+
+            if _scientific_checkers.enabled():
+                try:
+                    _scientific_checkers.check_uncertainty_cross_representation(
+                        self, operation, other_nddata, result_data, correlation,
+                        result_uncertainty,
+                    )
+                except Exception:
+                    pass
+
+        return result_uncertainty
 
     def _convert_uncertainty(self, other_uncert):
         """Checks if the uncertainties are compatible for propagation.

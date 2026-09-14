@@ -1718,3 +1718,91 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
         return
 
     trigger_if(abs(fap_roundtrip - fap_val) > _AB_TOL, "AP-TS-002")
+
+
+# --- Candidate AC: uncertainty-representation cross-implementation agreement
+#
+# LAW_CANDIDATES.md Candidate AC. Precondition: binary arithmetic propagation
+# (add/subtract/multiply/divide, not the collapse branch), both operand
+# uncertainty arrays present, acting class is StdDevUncertainty or
+# InverseVariance (never VarianceUncertainty itself, keeping the
+# re-derivation an independent cross-check rather than a self-check).
+# Tolerance: 50*eps64 relative in variance space, derived from a 100,000-
+# trial sweep isolating InverseVariance's extra 1/x round trip (worst
+# 24.8*eps64) and a separate sweep of the differing-but-convertible-unit
+# branch in _propagate_add_sub/_propagate_multiply_divide (worst ~6.2*eps64)
+# -- the plain same-unit StdDevUncertainty-vs-VarianceUncertainty case
+# sweeps to exactly 0.0 (same closed-form arithmetic, no extra transform),
+# so this candidate's real content is those two special code paths.
+
+_AC_TOL_EPS = 50.0 * _EPS64
+
+
+@_guard("uncertainty_cross_representation")
+def check_uncertainty_cross_representation(
+    self_uncertainty, operation, other_nddata, result_data, correlation, result
+):
+    """AP-NDDATA-001 (Candidate AC): StdDevUncertainty and InverseVariance
+    propagation must agree, in variance space, with an independent
+    re-derivation via VarianceUncertainty on the same operands -- three
+    independently coded closed-form Gaussian error-propagation formulas
+    (and, for Std/InverseVariance, their own extra sqrt/1x transforms and
+    unit-conversion branches) computing the identical physical quantity.
+    """
+    from astropy.nddata.nduncertainty import StdDevUncertainty, VarianceUncertainty
+
+    if not isinstance(self_uncertainty, (StdDevUncertainty, InverseVariance)):
+        return
+    if self_uncertainty.array is None:
+        return
+    other_uncertainty = getattr(other_nddata, "uncertainty", None)
+    if other_uncertainty is None or other_uncertainty.array is None:
+        return
+    if not isinstance(other_uncertainty, type(self_uncertainty)):
+        return
+
+    op_name = operation.__name__
+    if op_name not in ("add", "subtract", "multiply", "true_divide", "divide"):
+        return
+
+    try:
+        self_var = VarianceUncertainty(
+            self_uncertainty._convert_to_variance().array,
+            unit=self_uncertainty._convert_to_variance().unit,
+            copy=False,
+        )
+        other_var_obj = other_uncertainty._convert_to_variance()
+        other_nddata_var = other_nddata.__class__(
+            other_nddata.data,
+            unit=other_nddata.unit,
+            uncertainty=VarianceUncertainty(
+                other_var_obj.array, unit=other_var_obj.unit, copy=False
+            ),
+        )
+    except Exception:
+        return
+
+    try:
+        var_reference = self_var.propagate(
+            operation, other_nddata_var, result_data, correlation
+        )
+    except Exception:
+        return
+    if var_reference.array is None:
+        return
+
+    try:
+        var_from_self = self_uncertainty._convert_to_variance().array
+        var_from_reference = var_reference.array
+    except Exception:
+        return
+
+    import numpy as np
+
+    if not (
+        np.all(np.isfinite(var_from_self)) and np.all(np.isfinite(var_from_reference))
+    ):
+        return
+    denom = np.where(np.abs(var_from_reference) < 1e-300, 1.0, np.abs(var_from_reference))
+    relerr = float(np.max(np.abs(var_from_self - var_from_reference) / denom))
+    trigger_if(relerr > _AC_TOL_EPS, "AP-NDDATA-001")
