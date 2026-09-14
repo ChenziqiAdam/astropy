@@ -326,7 +326,7 @@ def check_time_arithmetic_inverse(t1, t2, delta):
 _F_TOL_PX = 1e-6
 
 
-_F_EXCLUDED_PROJECTIONS = frozenset({"CSC"})
+_F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC"})
 
 
 @_guard("wcs_projection_roundtrip")
@@ -340,14 +340,27 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     (N, 2) pixel/world arrays production code just computed; ``origin`` is
     the same origin convention (0 or 1) used for the forward call.
 
-    CSC (COBE quad-cube) is excluded by name: a census of all 27 standard
-    projection headers shipped in astropy's own test suite found CSC alone
-    failing this law at 100% of trials (errors up to 2.5e-3 px, five orders
-    of magnitude past tolerance, unrelated to distance from the reference
-    pixel) -- wcs_world2pix's Newton inversion structurally fails to
-    disambiguate CSC's projection, not amplified rounding. Found during
-    implementation verification, not anticipated in the original design;
-    see LAW_CANDIDATES.md Candidate F's precondition-correction note.
+    The three quad-cube projections (CSC, TSC, QSC) are excluded by name:
+    a census of all 27 standard projection headers shipped in astropy's own
+    test suite found CSC failing this law at 100% of trials (errors up to
+    2.5e-3 px, five orders of magnitude past tolerance, unrelated to distance
+    from the reference pixel) -- wcs_world2pix's Newton inversion structurally
+    fails to disambiguate CSC's projection, not amplified rounding.
+
+    Fixed post-audit (2026-09-14, independent triggerability probe): a
+    dedicated adversarial sweep specifically targeting quad-cube-family
+    projections found TSC and QSC share the identical failure, but past a
+    sharp ~45 deg-from-reference-pixel threshold rather than CSC's 100% rate
+    -- both wrap by exactly one full longitude turn (offset = 360 deg *
+    px/deg, e.g. 36000.0 px at 100 px/deg), deterministic and reproducible,
+    not noise. Same root cause (quad-cube facet disambiguation in wcslib's
+    Newton inversion), same fix: add both to the name exclusion set. All
+    three quad-cube projections are now excluded; the 24 non-quad-cube
+    standard projections (checked exhaustively, including the ones requiring
+    non-default PV parameters to avoid a wcsset ERROR 5) remain covered by
+    the law and stayed silent (worst observed error 5.8e-9 px, well within
+    tolerance). See LAW_CANDIDATES.md Candidate F's precondition-correction
+    note.
     """
     import numpy as np
 
@@ -1019,9 +1032,29 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 # accumulation, no residual scale/n dependence. Final: `tol = 1e-9`
 # (~1000x margin over the observed worst case), unchanged from the
 # original value -- the fix is the precondition, not the tolerance.
+#
+# Second precondition gap found post-audit (2026-09-14, independent
+# triggerability probe): the `_Q_SHIFT_RATIO_MAX` exclusion above only
+# bounds the checker's own internally-drawn `b` relative to `a*data`'s
+# spread -- it does nothing about the caller's *original* data already
+# having a large baseline relative to its own spread (e.g. any real
+# dataset with a physical additive background: detector counts, a flux
+# with a bias level, a temperature series in Kelvin). In that case
+# `result` itself -- computed by production code from the caller's
+# already-offset array, before this checker ever runs -- is already
+# affected by the same catastrophic-cancellation mechanism, and no bound
+# on the checker's own re-transform can undo that. A sweep varying only
+# this pre-existing baseline (cond = baseline / std(data), 20 decades,
+# one fixed 5-point dataset) found smooth, monotonic relative-error
+# growth crossing `_Q_TOL` at cond ~ 1e8; a broader 2,000-trial sweep
+# (n 5-60, cond up to 1e6) found a stable worst relerr/tol ratio of 0.11
+# (~9x margin), no instability. Same fix pattern as Candidate R
+# (AP-STATS-004): gate on the data's own location/spread condition
+# number, computed from the array already in hand.
 
 _Q_TOL = 1e-9
 _Q_SHIFT_RATIO_MAX = 1e3
+_Q_DATA_COND_MAX = 1e6
 
 
 @_guard("biweight_scale_equivariance")
@@ -1057,6 +1090,10 @@ def check_biweight_midvariance_equivariance(
 
     arr_std = float(np.std(arr))
     if not (np.isfinite(arr_std) and arr_std > 0):
+        return
+
+    data_cond = abs(float(np.median(arr))) / arr_std
+    if data_cond > _Q_DATA_COND_MAX:
         return
 
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
@@ -1118,9 +1155,33 @@ def check_biweight_midvariance_equivariance(
 # magnitude range, its worst bias/scale ratio stayed a stable ~4e-14 with
 # no cancellation-driven growth, since jackknife's bias formula for the
 # mean is an exact algebraic zero regardless of centering.
+#
+# Bias-check blind spot found post-audit (2026-09-14, independent
+# triggerability probe): the claim above ("no cancellation-driven growth")
+# was falsified by data whose raw values are individually huge but happen
+# to *sum* to something near zero (e.g. paired +-1e15 values) -- `xbar`
+# itself lands near zero precisely because of that cancellation, so
+# `cond = |xbar|/predicted_se` (the variable the original sweep centered
+# on) stays small and hides the fragility instead of catching it. The
+# actual mechanism: each jackknife fold recomputes `mean(arr[:i]+arr[i+1:])`
+# by summing n-1 raw values whose individual magnitude sets the absolute
+# float64 rounding floor of that sum (ULP ~ 2^-52 * max|value|) --
+# independent of how those values happen to combine. A sweep confirmed
+# `max|x|/predicted_se` and `max|x|/std(x)` both fail to separate
+# triggering from non-triggering trials (a repro at cond as low as 1.0
+# still fires), because the driver is the raw magnitude itself, not its
+# ratio to any derived spread. A direct sweep over `max(|x|)` alone
+# (mixed structures: offset+noise, symmetric-pair+noise, wide-uniform; n
+# 2-500) found a clean, monotonic threshold: worst bias/scale ratio
+# 4.7e-10 at magnitude <=1e4 (~20x margin under `_R_BIAS_TOL`), climbing
+# past the tolerance itself by magnitude ~1e5. Gated on `max(|x|) <=
+# _R_BIAS_MAG_MAX`. The std_err check needed no change -- confirmed
+# clean (se_relerr=0) on the exact falsifying repro; only the bias
+# check shares this blind spot.
 
 _R_BIAS_TOL = 1e-8
 _R_SE_TOL_C = 5.0
+_R_BIAS_MAG_MAX = 1e4
 
 
 @_guard("jackknife_mean_closed_form")
@@ -1155,8 +1216,10 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     xbar = float(np.mean(arr))
     n = arr.size
 
-    bias_scale = max(abs(xbar), 1.0)
-    trigger_if(abs(bias_val) / bias_scale > _R_BIAS_TOL, "AP-STATS-004")
+    max_abs_x = float(np.max(np.abs(arr))) if arr.size else 0.0
+    if max_abs_x <= _R_BIAS_MAG_MAX:
+        bias_scale = max(abs(xbar), 1.0)
+        trigger_if(abs(bias_val) / bias_scale > _R_BIAS_TOL, "AP-STATS-004")
 
     predicted_se = math.sqrt(float(np.sum((arr - xbar) ** 2)) / (n * (n - 1)))
     if predicted_se <= 0.0 or not math.isfinite(predicted_se):
