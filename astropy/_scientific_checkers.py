@@ -489,6 +489,23 @@ def check_spectral_roundtrip(equiv_list):
 # agree" -- that vague first draft was rewritten, see LAW_CANDIDATES.md).
 # Tolerance 1e-6 (relative), derived from a 50,000-trial sweep across 4
 # rest-quantity branches with beta in [1e-6, 1e-3].
+#
+# Second-order term subtracted post-audit (2026-09-14, independent audit
+# finding, raised against this checker's sibling AP-UNITS-006 but equally
+# applicable here since both share this exact structure): comparing only
+# against the beta/2 leading-order term meant the "margin" at the top of
+# the beta window was not numerical slack but the fixed, deterministic
+# O(beta^2) Taylor truncation term itself -- a real physics deviation
+# smaller than that term would have been invisible. Verified analytically
+# (sympy series of sqrt((1-beta)/(1+beta))) and numerically: the residual
+# after subtracting only beta/2 tracks -beta^2/2 almost exactly (worst
+# case at beta=9e-4: residual -4.05e-7 vs -beta^2/2 = -4.05e-7). Fixed by
+# subtracting the analytically-derived -beta^2/2 term (consistent with
+# this checker's abs()-based observed_relerr convention) before comparing
+# to tolerance, which drops the residual to pure numerical noise
+# (~1e-10 to ~1e-13 across the same beta range) -- the same 1e-6 tolerance
+# now provides genuine ~1000-10000x margin instead of the ~2.5x margin
+# that was actually just truncation error.
 
 _I_BETA_MAX = 1e-3
 _I_BETA_MIN = 1e-5  # below this, float64 subtraction noise dominates (see derivation)
@@ -535,7 +552,7 @@ def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
             continue
 
         observed_relerr = abs((v_radio - v_rel) / v_rel)
-        predicted = 0.5 * abs(beta)
+        predicted = 0.5 * abs(beta) - 0.5 * beta**2
         trigger_if(abs(observed_relerr - predicted) > _I_TOL, "AP-UNITS-002")
 
 
@@ -1561,8 +1578,23 @@ _GM_MASS_ABBREVS = {"M_sun", "M_jup", "M_earth"}
 # this uses the published-literal tolerance regime, not the derived-in-repo
 # 10*eps64 regime (unlike sigma_sb/R/e_esu-family/M_x, muB is never
 # constructed with uncertainty==0.0 in any vintage inspected).
+#
+# Tolerance widened post-audit (2026-09-14, independent audit finding): the
+# original 1e-9 gave only 1.32x margin against codata2010's own relerr
+# (7.56e-10) -- not numerical noise but the genuine historical measurement-
+# precision gap of that older CODATA vintage (codata2014: 3.42e-10/2.93x,
+# codata2018: 6.70e-12/149x, codata2022: 4.11e-12/244x -- each successive
+# vintage's muB literal is measured more precisely and agrees better with
+# the formula, exactly as expected of real physics literals, not something
+# a wider numerical sweep could shrink). A thin margin here risked a false
+# trigger from nothing more than which vintage happens to be active.
+# Widened to 5e-9, restoring ~6.6x margin over codata2010 while remaining
+# far tighter than would be needed to hide an actual formula-vs-literal
+# defect (a real bug would need to be missed by roughly 5 parts in a
+# billion to slip past this, still an extremely tight bound for a
+# nine-significant-figure physical constant).
 
-_AH_TOL = 1e-9
+_AH_TOL = 5e-9
 
 
 @_guard("bohr_magneton_from_e_hbar_me")
@@ -1620,14 +1652,33 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
 # --- Candidate Z: Lomb-Scargle cross-implementation agreement ---------------
 #
 # LAW_CANDIDATES.md Candidate Z. Precondition: nterms=1, regular frequency
-# grid (fast's own domain), any normalization/fit_mean/center_data. Absolute
-# tolerance -- power is intrinsically bounded, not a quantity that should be
-# normalized by itself (the same reasoning as Candidate J's c-normalized
-# Doppler check). Tolerance: 1e-6 absolute, derived from two independent
-# 500-trial sweeps (worst 7.30e-11 and 2.42e-10) -- fast's FFT/extirpolation
-# scheme is a genuine bounded approximation to slow's exact sum, not an
-# alternative exact evaluation, so eps64-scale agreement is not expected
-# (unlike every prior cross-implementation candidate in this bank).
+# grid (fast's own domain), any normalization/fit_mean/center_data.
+#
+# Fixed post-audit (2026-09-14, independent audit finding): the original
+# design used a single absolute tolerance (1e-6) on the reasoning that
+# "power is intrinsically bounded" -- true only for normalization in
+# {standard, model, log}, whose power is O(1) and dimensionless. For
+# normalization='psd', power is dimensional (units of amplitude-squared per
+# frequency) and can be arbitrarily large (e.g. a Kepler-style light curve
+# in electrons/s with amplitude ~1e5 gives psd power ~1e10) -- an absolute
+# tolerance is meaningless there and the checker false-fired on an entirely
+# ordinary astronomical workflow. A targeted sweep found the *relative*
+# agreement between fast and slow is stable at ~1e-11 to 1e-14 across every
+# normalization and every amplitude tested, confirming the two
+# implementations genuinely agree and only the tolerance model was wrong.
+# Fixed by keeping the absolute check for the three O(1)-bounded
+# normalizations (as originally designed, still the tighter and more
+# meaningful check there) and adding a relative check for 'psd' specifically.
+#
+# Tolerance: 1e-6 absolute for standard/model/log, derived from two
+# independent 500-trial sweeps (worst 7.30e-11 and 2.42e-10) plus a 300-trial
+# post-fix re-sweep spanning amplitudes 1e-6 to 1e6 (worst 1.6e-12 for these
+# three normalizations) -- fast's FFT/extirpolation scheme is a genuine
+# bounded approximation to slow's exact sum, not an alternative exact
+# evaluation, so eps64-scale agreement is not expected (unlike every prior
+# cross-implementation candidate in this bank). 1e-6 relative for 'psd',
+# derived from the same 300-trial sweep (worst relative error 3.57e-10
+# across all four normalizations combined) -- ~2700x margin.
 #
 # Re-deriving via method='slow' is O(N * Nfreq), the same cost class as
 # AP-CONV-003's re-call to convolve_fft -- capped by problem size (not by
@@ -1636,7 +1687,8 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
 # make the checker itself the bottleneck. Cap chosen generously above
 # realistic test-suite sizes, not tuned to any specific input.
 
-_Z_TOL = 1e-6
+_Z_TOL_ABS = 1e-6
+_Z_TOL_REL = 1e-6
 _Z_MAX_COST = 2_000_000  # N * Nfreq
 
 
@@ -1647,7 +1699,10 @@ def check_lombscargle_cross_implementation(
     """AP-TS-001 (Candidate Z): LombScargle.power(..., method='fast') must
     agree with method='slow' on the same inputs, within fast's own
     documented approximation budget (not eps64 -- fast is an approximate
-    FFT/extirpolation scheme, slow is the exact direct sum).
+    FFT/extirpolation scheme, slow is the exact direct sum). Absolute
+    tolerance for the three O(1)-bounded normalizations (standard, model,
+    log); relative tolerance for 'psd', whose power is dimensional and can
+    be arbitrarily large or small depending on the input amplitude.
     """
     import numpy as np
 
@@ -1690,19 +1745,42 @@ def check_lombscargle_cross_implementation(
         return
 
     diff = float(np.max(np.abs(power_arr - slow_power)))
-    trigger_if(diff > _Z_TOL, "AP-TS-001")
+    if normalization == "psd":
+        denom = np.maximum(np.abs(slow_power), 1e-300)
+        relerr = float(np.max(np.abs(power_arr - slow_power) / denom))
+        trigger_if(relerr > _Z_TOL_REL, "AP-TS-001")
+    else:
+        trigger_if(diff > _Z_TOL_ABS, "AP-TS-001")
 
 
 # --- Candidate AB: single-frequency false-alarm-probability round trip -----
 #
 # LAW_CANDIDATES.md Candidate AB. Precondition: fap in (0,1), dK-dH==2 (the
-# only case _statistics.py implements), N > dK. Absolute tolerance -- fap is
-# a probability, intrinsically bounded to [0,1]. Tolerance: 1e-9 absolute,
-# derived from an 80,000-trial sweep across all 4 normalizations (worst
-# 5.51e-13) -- both directions are short closed-form elementary-function
-# chains, an ordinary few-hundred-ULP composition.
+# only case _statistics.py implements), dK < N <= 1e6. Absolute tolerance --
+# fap is a probability, intrinsically bounded to [0,1]. Tolerance: 1e-9
+# absolute, derived from an 80,000-trial sweep across all 4 normalizations
+# (worst 5.51e-13) -- both directions are short closed-form elementary-
+# function chains, an ordinary few-hundred-ULP composition.
+#
+# Upper bound on N added post-audit (2026-09-14, independent audit finding):
+# the original design sweep covered N up to 10,000 and found comfortable
+# margin, but the precondition placed no upper bound on N at all. For
+# normalization in {standard, model}, inv_fap_single/fap_single involve a
+# (1-fap)**(1/Nk)-style expression that suffers catastrophic cancellation as
+# fap -> 1, with error growing roughly linearly in N -- confirmed directly:
+# 2.7e-10 at N=1e7, 2.5e-9 at N=1e8 (already past the 1e-9 tolerance),
+# 1e-5 at N=1e12. log and psd stay at exactly 0.0 regardless of N (no
+# cancellation in their closed forms). N is the number of data points in
+# the time series (via LombScargle.false_alarm_level), so a ceiling of 1e6
+# comfortably covers realistic single- and multi-decade survey light curves
+# while excluding the regime where this is a genuine formula limitation
+# rather than a real astropy defect. A 3000-trial sweep for N up to 1e6
+# (all 4 normalizations, fap in [1e-8, 1-1e-10]) found worst 4.32e-11; a
+# 5000-trial adversarial sweep right at the N=1e6 boundary with fap forced
+# into [1-1e-3, 1-1e-12] found worst 5.51e-11 -- ~18x margin.
 
 _AB_TOL = 1e-9
+_AB_MAX_N = 1_000_000
 
 
 @_guard("false_alarm_probability_roundtrip")
@@ -1736,7 +1814,7 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
         return
     if not (isinstance(N, (int,)) or float(N).is_integer()):
         return
-    if N <= dK:
+    if N <= dK or N > _AB_MAX_N:
         return
 
     try:
@@ -1756,15 +1834,56 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
 # uncertainty arrays present, acting class is StdDevUncertainty or
 # InverseVariance (never VarianceUncertainty itself, keeping the
 # re-derivation an independent cross-check rather than a self-check).
-# Tolerance: 50*eps64 relative in variance space, derived from a 100,000-
-# trial sweep isolating InverseVariance's extra 1/x round trip (worst
+#
+# Fixed post-audit (2026-09-14, independent audit finding): this checker was
+# shipped with three latent bugs that made it either a permanent no-op or a
+# guaranteed false-positive storm, none caught by the original self-
+# verification sweep because that sweep never actually exercised the shipped
+# code path end to end:
+#   1. `InverseVariance` was referenced but never imported -- every call
+#      raised NameError immediately, silently swallowed by _guard. The
+#      recorded "100,000-trial sweep" could not have run against this code.
+#   2. The comparison read `self_uncertainty` (input operand A) instead of
+#      `result` (the actual propagated output, already passed in as a hook
+#      parameter but never used) -- an O(1) mismatch on nearly every call.
+#   3. The independent re-derivation built an unassociated VarianceUncertainty
+#      (no parent_nddata) and called .propagate() on it directly; this
+#      crashes for multiply/divide (which need self.parent_nddata.data for
+#      the multiplicative term) and for any unit-bearing add/subtract (needs
+#      a Quantity result_data, which the checker had access to all along but
+#      the reconstructed operand didn't carry consistently) -- every
+#      multiply/divide call was silently skipped, matching the sanitizers.json
+#      claim of testing "add/subtract/multiply/divide" when only add/subtract
+#      ever ran to completion.
+# Fixed by importing InverseVariance, comparing against `result` (not
+# `self_uncertainty`), and building both the self-side and other-side
+# variance re-derivations as fully NDData-associated objects (mirroring how
+# `other_nddata_var` was already built) so .propagate() has everything both
+# _propagate_add_sub and _propagate_multiply_divide need.
+#
+# A fourth issue surfaced only by running astropy's own test suite (not the
+# original design sweep, which used float64 throughout): the tolerance was
+# a fixed 50*eps64, but astropy.nddata's arithmetic mixin fully respects the
+# operand dtype (float32 in, float32 out) -- test_arithmetics_dtypes_uncert_
+# mask exercises float32 propagation and the checker's own relerr came out
+# ~0.5-0.75*eps32 (~6-9e-8), seven orders of magnitude past a float64-scaled
+# tolerance despite being a clean, correct float32 computation. Fixed by
+# scaling the tolerance to the actual working dtype's own eps (float64 as a
+# fallback for non-floating dtypes, which cannot occur here since variance
+# arithmetic always promotes to a float dtype).
+#
+# Tolerance: 50*working_eps relative in variance space, derived from a
+# 100,000-trial sweep isolating InverseVariance's extra 1/x round trip (worst
 # 24.8*eps64) and a separate sweep of the differing-but-convertible-unit
 # branch in _propagate_add_sub/_propagate_multiply_divide (worst ~6.2*eps64)
 # -- the plain same-unit StdDevUncertainty-vs-VarianceUncertainty case
 # sweeps to exactly 0.0 (same closed-form arithmetic, no extra transform),
-# so this candidate's real content is those two special code paths.
+# so this candidate's real content is those two special code paths. Re-
+# verified post-fix with a 96,000-trial sweep across both classes, 4 units,
+# 4 ops, and 12 decades of magnitude: worst 1.0*eps (float64), 20,000+
+# additional trials in float32 confirming sub-eps32 agreement.
 
-_AC_TOL_EPS = 50.0 * _EPS64
+_AC_TOL_EPS_FACTOR = 50.0
 
 
 @_guard("uncertainty_cross_representation")
@@ -1778,7 +1897,11 @@ def check_uncertainty_cross_representation(
     (and, for Std/InverseVariance, their own extra sqrt/1x transforms and
     unit-conversion branches) computing the identical physical quantity.
     """
-    from astropy.nddata.nduncertainty import StdDevUncertainty, VarianceUncertainty
+    from astropy.nddata.nduncertainty import (
+        InverseVariance,
+        StdDevUncertainty,
+        VarianceUncertainty,
+    )
 
     if not isinstance(self_uncertainty, (StdDevUncertainty, InverseVariance)):
         return
@@ -1790,15 +1913,22 @@ def check_uncertainty_cross_representation(
     if not isinstance(other_uncertainty, type(self_uncertainty)):
         return
 
+    self_nddata = self_uncertainty.parent_nddata
+    if self_nddata is None:
+        return
+
     op_name = operation.__name__
     if op_name not in ("add", "subtract", "multiply", "true_divide", "divide"):
         return
 
     try:
-        self_var = VarianceUncertainty(
-            self_uncertainty._convert_to_variance().array,
-            unit=self_uncertainty._convert_to_variance().unit,
-            copy=False,
+        self_var_obj = self_uncertainty._convert_to_variance()
+        self_nddata_var = self_nddata.__class__(
+            self_nddata.data,
+            unit=self_nddata.unit,
+            uncertainty=VarianceUncertainty(
+                self_var_obj.array, unit=self_var_obj.unit, copy=False
+            ),
         )
         other_var_obj = other_uncertainty._convert_to_variance()
         other_nddata_var = other_nddata.__class__(
@@ -1812,7 +1942,7 @@ def check_uncertainty_cross_representation(
         return
 
     try:
-        var_reference = self_var.propagate(
+        var_reference = self_nddata_var.uncertainty.propagate(
             operation, other_nddata_var, result_data, correlation
         )
     except Exception:
@@ -1821,7 +1951,7 @@ def check_uncertainty_cross_representation(
         return
 
     try:
-        var_from_self = self_uncertainty._convert_to_variance().array
+        var_from_result = result._convert_to_variance().array
         var_from_reference = var_reference.array
     except Exception:
         return
@@ -1829,12 +1959,18 @@ def check_uncertainty_cross_representation(
     import numpy as np
 
     if not (
-        np.all(np.isfinite(var_from_self)) and np.all(np.isfinite(var_from_reference))
+        np.all(np.isfinite(var_from_result)) and np.all(np.isfinite(var_from_reference))
     ):
         return
     denom = np.where(np.abs(var_from_reference) < 1e-300, 1.0, np.abs(var_from_reference))
-    relerr = float(np.max(np.abs(var_from_self - var_from_reference) / denom))
-    trigger_if(relerr > _AC_TOL_EPS, "AP-NDDATA-001")
+    relerr = float(np.max(np.abs(var_from_result - var_from_reference) / denom))
+
+    working_dtype = np.result_type(var_from_result.dtype, var_from_reference.dtype)
+    if np.issubdtype(working_dtype, np.floating):
+        working_eps = float(np.finfo(working_dtype).eps)
+    else:
+        working_eps = _EPS64
+    trigger_if(relerr > _AC_TOL_EPS_FACTOR * working_eps, "AP-NDDATA-001")
 
 
 # --- Candidate AD: spherical/Cartesian representation round trip -----------
@@ -1902,15 +2038,32 @@ def check_spherical_cartesian_roundtrip(spherical_self, cartesian_result):
 #
 # LAW_CANDIDATES.md Candidate AE. Precondition: base given (required to
 # convert between the two conventions at all -- represent_as raises its own
-# TypeError otherwise, nothing to guard). No pole exclusion needed: cos(lat)
-# never reaches exactly 0.0 in float64 (cos(90deg) == 6.12e-17), so the
-# d_lon_coslat = d_lon*cos(lat) / cos(lat) round trip never divides by a
-# true zero, and a 50,000-trial adversarial sweep down to cos(lat)~2.3e-10
-# found no conditioning-driven amplification at all (worst case matched the
-# ordinary-latitude sweep almost exactly). Tolerance: 5*eps64 relative,
-# derived from a 100,000-trial sweep (worst 0.98*eps64).
+# TypeError otherwise, nothing to guard). cos(lat) never reaches exactly 0.0
+# in float64 (cos(90deg) == 6.12e-17), so the d_lon_coslat = d_lon*cos(lat) /
+# cos(lat) round trip never divides by a true zero, and a 50,000-trial
+# adversarial sweep down to cos(lat)~2.3e-10 found no conditioning-driven
+# amplification at all (worst case matched the ordinary-latitude sweep
+# almost exactly). Tolerance: 5*eps64 relative, derived from a 100,000-
+# trial sweep (worst 0.98*eps64).
+#
+# Denormal-underflow exclusion added post-audit (2026-09-14, independent
+# audit finding): the original "no pole exclusion needed" claim held for
+# realistic-magnitude proper motions, but was never tested against d_lon
+# small enough that d_lon*cos(lat) underflows into float64's subnormal
+# range (below ~2.23e-308) -- subnormals carry progressively fewer
+# significant bits than normal floats as they shrink, which is a genuine,
+# well-understood precision loss, not a drift between the two conversion
+# methods. Confirmed directly: at lat=90deg exactly with d_lon=1e-300 (so
+# d_lon*cos(lat) ~ 6.12e-317, deep in subnormal range), the round trip
+# relative error was 3.37e-8 (~1.5e8*eps64). Excluding inputs where
+# d_lon*cos(lat) would underflow below the normal-float threshold, a
+# 50,000-trial sweep re-including exact poles and d_lon down to 1e-186
+# found worst 0.97*eps64, matching the original (pre-exclusion) claim
+# almost exactly -- confirming the subnormal regime was the entire
+# discrepancy, not a broader unaccounted-for effect.
 
 _AE_TOL_EPS = 5.0 * _EPS64
+_AE_MIN_NORMAL_FLOAT = 2.2250738585072014e-308  # np.finfo(np.float64).tiny
 
 
 @_guard("spherical_differential_coslat_roundtrip")
@@ -1928,9 +2081,21 @@ def check_spherical_differential_coslat_roundtrip(
     """
     import numpy as np
 
+    from astropy import units as u
     from astropy.coordinates.representation.spherical import SphericalDifferential
 
     if base is None:
+        return
+
+    try:
+        d_lon_val = np.asarray(
+            self_differential.d_lon.to_value(self_differential.d_lon.unit)
+        )
+        coslat_val = np.cos(base.lat.to_value(u.rad))
+        underflows = np.abs(d_lon_val * coslat_val) < _AE_MIN_NORMAL_FLOAT
+        if np.any(underflows & (d_lon_val != 0)):
+            return
+    except Exception:
         return
 
     try:
@@ -2021,8 +2186,21 @@ def check_mad_std_scale_factor(mad_std_result, mad_value):
 # relativistic formula. A 20,000-trial-per-rest-type sweep (4 rest
 # quantities: GHz, nm, eV, cm) found the residual after subtracting beta/2
 # matches the predicted next O(beta^2) term, worst 5.00e-7, with no
-# unexplained excess. Tolerance: 1e-6, same value and same ~2x margin as
-# AP-UNITS-002.
+# unexplained excess.
+#
+# Second-order term subtracted post-audit (2026-09-14, independent audit
+# finding): the tolerance's apparent ~2.5x margin at the top of the beta
+# window was not numerical slack but the fixed, deterministic O(beta^2)
+# Taylor term itself -- a real physics deviation below that size would
+# have been invisible. The +beta^2/2 sign (opposite to AP-UNITS-002's
+# -beta^2/2, consistent with this checker's un-abs'd observed_relerr
+# convention where optical overestimates positively) was confirmed
+# analytically and numerically: subtracting it drops the residual to
+# ~1e-10 to ~1e-13 across the same beta range (worst case at beta=9e-4:
+# -4.05e-7 before, 2.74e-10 after). Same fix applied to AP-UNITS-002 for
+# consistency, since it shares this exact structure. Tolerance: 1e-6,
+# same value as before but now genuine noise-level margin (~1000-10000x)
+# rather than truncation-error margin (~2.5x).
 
 _AG_BETA_MIN = 1e-5
 _AG_BETA_MAX = 1e-3
@@ -2068,7 +2246,7 @@ def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz)
             continue
 
         observed_relerr = (v_opt - v_rel) / v_rel
-        predicted = 0.5 * abs(beta)
+        predicted = 0.5 * abs(beta) + 0.5 * beta**2
         trigger_if(abs(observed_relerr - predicted) > _AG_TOL, "AP-UNITS-006")
 
 
@@ -2179,18 +2357,32 @@ def check_log_stretch_inverse_roundtrip(a, x_in, y_out):
 # --- Candidate AK: asinh-stretch / sinh-stretch round trip ------------------
 #
 # LAW_CANDIDATES.md Candidate AK. AsinhStretch computes
-# y = asinh(x/a) / asinh(1/a); its .inverse (SinhStretch with a rescaled
-# parameter a' = 1/asinh(1/a)) computes x = a' * sinh(y / a') -- an
-# algebraically distinct transcendental-function pair (asinh/log-family vs.
-# sinh/exp-family), the same genuine-cross-check structure as AP-VIS-001,
-# unlike this bank's tautological rotation round trips. Unlike AP-VIS-001,
-# no restriction on `a` is needed: a 50,000-trial sweep over a spanning
-# 10 decades (1e-10 to 1e10) found worst absolute error 6.77e-15 with no
-# growth at the extremes (AsinhStretch's own arcsinh(1/a) rescaling keeps
-# the argument to sinh/arcsinh well-conditioned everywhere, unlike
-# LogStretch's log(a*x+1) which loses precision as a*x -> 0).
+# y = asinh(x/a) / asinh(1/a); its .inverse is SinhStretch with a rescaled
+# parameter a' = 1/asinh(1/a), which computes x = sinh(y/a') / sinh(1/a')
+# (read directly from SinhStretch.__call__ -- an earlier version of this
+# comment incorrectly stated the inverse as "a' * sinh(y/a')", which is not
+# what the code computes; corrected post-audit, 2026-09-14, no change to the
+# checker's actual behavior since the checker calls SinhStretch itself
+# rather than re-implementing its formula). This is still an algebraically
+# distinct transcendental-function pair (asinh/log-family forward vs.
+# sinh/exp-family inverse), the same genuine-cross-check structure as
+# AP-VIS-001.
+#
+# Precondition on `a` added post-audit (2026-09-14, independent audit
+# finding): the original design claimed no restriction on `a` was needed,
+# based on a 50,000-trial sweep over 10 decades (1e-10 to 1e10, worst
+# 6.77e-15) that did not extend below 1e-10. A wider sweep down to
+# a=1e-300 found the claim was only half right: large `a` is genuinely
+# unconditioned (worst 2.22e-16 for a in [1e10, 1e300]), but small `a`
+# degrades smoothly below ~1e-20 (9.77e-15 at 1e-20, 2.23e-14 at 1e-30 --
+# already at the old tolerance boundary, 2.60e-14 at 1e-50). Since
+# AsinhStretch's own docstring examples span only 0.01-3.0, a floor of
+# a >= 1e-10 comfortably covers realistic use (worst 5.22e-15 across
+# 50,000 trials for a in [1e-10, 1e300]) while excluding the regime where
+# this is a genuine precision limit of the formula, not a real drift.
 
 _AK_TOL_ABS = 100.0 * _EPS64
+_AK_A_MIN = 1e-10
 
 
 @_guard("asinh_stretch_inverse_roundtrip")
@@ -2203,6 +2395,9 @@ def check_asinh_stretch_inverse_roundtrip(a, x_in, y_out):
     import numpy as np
 
     from astropy.visualization.stretch import SinhStretch
+
+    if a < _AK_A_MIN:
+        return
 
     x_arr = np.asarray(x_in, dtype=float)
     y_arr = np.asarray(y_out, dtype=float)
@@ -2296,11 +2491,30 @@ def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
 # radius sweep found the error decays smoothly and monotonically toward
 # Earth's surface (0.25 m at 1000 km, 3.3e-4 m at 4000 km, ~1e-8 m at the
 # true 6357 km surface) with no sharp cutoff, so a generous
-# floor was chosen well below Earth's actual surface: a 30,000-trial sweep
-# for radius in [4e6, 4e10] m (4000 km out past GEO and beyond) found
-# worst distance 1.6e-3 m, ~6x margin under tolerance.
+# floor was chosen well below Earth's actual surface.
+#
+# Fixed post-audit (2026-09-14, independent audit finding): the original
+# tolerance was a flat 1e-2 m absolute, derived only from a sweep bounded at
+# r=4e10 m (worst 1.6e-3 m there). The underlying error is fundamentally
+# relative (~1e-15 * r, ordinary float64 rounding on the coordinate
+# magnitude, not an absolute artifact of the algorithm), so the flat
+# tolerance was guaranteed to break for large enough r -- confirmed
+# directly: 7.6e-3 m at r=1e13 m (already past tolerance), 0.1 m at
+# r=1e14 m, 80 m at r=1e17 m. `EarthLocation` places no upper bound on its
+# own Cartesian inputs, so an absolute tolerance can always be defeated by
+# a large enough (if unphysical for an *Earth* location) radius. Fixed by
+# switching to a relative tolerance on distance/radius, which a 5000-trial
+# sweep spanning radius 4e6 m to 1e20 m (14 decades past the original
+# design's r=4e10 m ceiling) found stable at ~7-8e-11 with **no growth** at
+# any tested extreme -- unlike AP-COORD-007's sibling AP-VIS-001/003, whose
+# absolute-tolerance-breaking regimes needed an upper precondition bound,
+# here the relative form is unconditionally robust and no radius ceiling
+# is needed at all.
+#
+# Tolerance: 1e-9 relative (distance / radius), ~13x margin over the 7.6e-11
+# worst observed across the full swept range.
 
-_AM_TOL_M = 1e-2  # 1 cm, ~6x margin over the 1.6mm worst observed
+_AM_TOL_REL = 1e-9
 _AM_MIN_RADIUS_M = 4.0e6
 
 
@@ -2341,5 +2555,6 @@ def check_geodetic_roundtrip(ellipsoid, x, y, z, lon, lat, height):
     ):
         return
 
-    dist = float(np.max(np.sqrt((xb - x_arr) ** 2 + (yb - y_arr) ** 2 + (zb - z_arr) ** 2)))
-    trigger_if(dist > _AM_TOL_M, "AP-COORD-007")
+    dist = np.sqrt((xb - x_arr) ** 2 + (yb - y_arr) ** 2 + (zb - z_arr) ** 2)
+    relerr = float(np.max(dist / radius))
+    trigger_if(relerr > _AM_TOL_REL, "AP-COORD-007")
