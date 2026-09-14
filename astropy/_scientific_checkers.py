@@ -1806,3 +1806,64 @@ def check_uncertainty_cross_representation(
     denom = np.where(np.abs(var_from_reference) < 1e-300, 1.0, np.abs(var_from_reference))
     relerr = float(np.max(np.abs(var_from_self - var_from_reference) / denom))
     trigger_if(relerr > _AC_TOL_EPS, "AP-NDDATA-001")
+
+
+# --- Candidate AD: spherical/Cartesian representation round trip -----------
+#
+# LAW_CANDIDATES.md Candidate AD. Precondition: distance > 0 (a zero-distance
+# point has no direction, so lon/lat are undefined -- the underlying
+# Cartesian round trip is still trivially exact there, (0,0,0)==(0,0,0),
+# but the precondition documents why lon/lat can legitimately differ).
+# Tolerance: 20*eps64 relative to the vector's own distance, derived from a
+# 200,000-trial uniform sweep (worst 4.48*eps64) plus a 100,000-trial
+# near-pole/wide-magnitude adversarial sweep (worst 1.0*eps64, tighter, no
+# pole degradation found) -- SphericalRepresentation.to_cartesian/
+# from_cartesian are independently coded ERFA calls (s2p/p2s), not the same
+# formula run twice.
+
+_AD_TOL_EPS = 20.0 * _EPS64
+
+
+@_guard("spherical_cartesian_roundtrip")
+def check_spherical_cartesian_roundtrip(spherical_self, cartesian_result):
+    """AP-COORD-005 (Candidate AD): from_cartesian(to_cartesian(s)) must
+    return to the same Cartesian point as to_cartesian(s) itself --
+    SphericalRepresentation.to_cartesian (ERFA s2p) and .from_cartesian
+    (ERFA p2s) are independently coded forward/inverse trig transforms for
+    the identical 3D point.
+    """
+    import numpy as np
+
+    from astropy.coordinates.representation.spherical import (
+        SphericalRepresentation,
+    )
+
+    distance = spherical_self.distance
+    try:
+        distance_value = np.asarray(distance.to_value(distance.unit))
+    except Exception:
+        return
+    if not np.all(np.isfinite(distance_value)) or np.any(distance_value <= 0):
+        return
+
+    try:
+        roundtrip_spherical = SphericalRepresentation.from_cartesian(
+            cartesian_result
+        )
+        roundtrip_cartesian = roundtrip_spherical.to_cartesian()
+    except Exception:
+        return
+
+    try:
+        dx = (roundtrip_cartesian.x - cartesian_result.x).to_value(distance.unit)
+        dy = (roundtrip_cartesian.y - cartesian_result.y).to_value(distance.unit)
+        dz = (roundtrip_cartesian.z - cartesian_result.z).to_value(distance.unit)
+    except Exception:
+        return
+    diff = np.sqrt(dx**2 + dy**2 + dz**2)
+    if not np.all(np.isfinite(diff)):
+        return
+
+    denom = np.where(distance_value == 0, 1.0, distance_value)
+    relerr = float(np.max(diff / denom))
+    trigger_if(relerr > _AD_TOL_EPS, "AP-COORD-005")

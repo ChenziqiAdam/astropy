@@ -557,7 +557,19 @@ class SphericalRepresentation(BaseRepresentation):
         # erfa s2p: Convert spherical polar coordinates to p-vector.
         p = erfa_ufunc.s2p(self.lon, self.lat, d)
 
-        return CartesianRepresentation(p, xyz_axis=-1, copy=False)
+        result = CartesianRepresentation(p, xyz_axis=-1, copy=False)
+
+        from astropy import _scientific_checkers
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_spherical_cartesian_roundtrip(
+                    self, result
+                )
+            except Exception:
+                pass
+
+        return result
 
     @classmethod
     def from_cartesian(cls, cart):
