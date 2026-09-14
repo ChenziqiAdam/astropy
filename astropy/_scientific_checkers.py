@@ -2070,3 +2070,54 @@ def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz)
         observed_relerr = (v_opt - v_rel) / v_rel
         predicted = 0.5 * abs(beta)
         trigger_if(abs(observed_relerr - predicted) > _AG_TOL, "AP-UNITS-006")
+
+
+# --- Candidate AI: 2D rotation model inverse round trip ---------------------
+#
+# LAW_CANDIDATES.md Candidate AI. Precondition: finite angle, finite (x, y).
+# No degenerate cases -- a 2D rotation matrix is always invertible (its
+# determinant is cos^2+sin^2=1 for every angle), unlike the sphere-pole or
+# coincident-point exclusions needed elsewhere in this bank. Tolerance:
+# 30*eps64 relative to max(|x|,|y|), derived from a 100,000-trial sweep
+# (worst 9.33*eps64) spanning angles to +/-720deg and coordinates to 1e6 --
+# Rotation2D.inverse constructs a fresh model with angle=-angle, and
+# evaluate() independently recomputes cos/sin (not merely negating the
+# forward matrix), so the round trip exercises two separately-computed
+# trigonometric matrices, not a tautological negate-and-reapply.
+
+_AI_TOL_EPS = 30.0 * _EPS64
+
+
+@_guard("rotation2d_inverse_roundtrip")
+def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
+    """AP-MODEL-002 (Candidate AI): rotating (x, y) by angle then by -angle
+    must return to (x, y). ``angle_rad`` is evaluate()'s own already-
+    unit-normalized radian value for this call (read after evaluate()'s own
+    Quantity-to-radian conversion, not re-derived), so this re-uses
+    Rotation2D._compute_matrix directly with the negated angle rather than
+    reconstructing a Rotation2D instance -- .inverse's angle=-self.angle
+    round-trips back through the Parameter's own degree/Quantity setter,
+    which would reintroduce a unit-conversion ambiguity this checker avoids
+    by working in evaluate()'s already-resolved radian frame throughout.
+    """
+    import numpy as np
+
+    try:
+        matrix_inv = cls._compute_matrix(-angle_rad)
+        inarr = np.stack(np.atleast_1d(x_rot, y_rot), axis=-2)
+        x_back, y_back = np.moveaxis(np.matmul(matrix_inv, inarr), -2, 0)
+    except Exception:
+        return
+
+    x_arr, y_arr = np.asarray(x), np.asarray(y)
+    xb_arr, yb_arr = np.asarray(x_back), np.asarray(y_back)
+    if not (
+        np.all(np.isfinite(xb_arr)) and np.all(np.isfinite(yb_arr))
+    ):
+        return
+
+    norm = np.maximum(np.maximum(np.abs(x_arr), np.abs(y_arr)), 1e-300)
+    relerr = float(
+        np.max(np.maximum(np.abs(xb_arr - x_arr), np.abs(yb_arr - y_arr)) / norm)
+    )
+    trigger_if(relerr > _AI_TOL_EPS, "AP-MODEL-002")

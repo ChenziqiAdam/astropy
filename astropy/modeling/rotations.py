@@ -514,7 +514,19 @@ class Rotation2D(Model):
         inarr = np.stack(np.atleast_1d(x, y), axis=-2)
         if isinstance(angle, u.Quantity):
             angle = angle.to_value(u.rad)
+        x_in, y_in = x, y
         x, y = np.moveaxis(np.matmul(cls._compute_matrix(angle), inarr), -2, 0)
+
+        from astropy import _scientific_checkers
+
+        if _scientific_checkers.enabled():
+            try:
+                _scientific_checkers.check_rotation2d_inverse_roundtrip(
+                    cls, x_in, y_in, angle, x, y
+                )
+            except Exception:
+                pass
+
         return x, y
 
     @staticmethod
