@@ -2121,3 +2121,56 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
         np.max(np.maximum(np.abs(xb_arr - x_arr), np.abs(yb_arr - y_arr)) / norm)
     )
     trigger_if(relerr > _AI_TOL_EPS, "AP-MODEL-002")
+
+
+# --- Candidate AJ: log-stretch / inverted-log-stretch round trip ------------
+#
+# LAW_CANDIDATES.md Candidate AJ. LogStretch computes
+# y = log(a*x+1)/log(a+1); its .inverse (InvertedLogStretch) computes the
+# algebraically distinct closed form x = ((a+1)^y - 1)/a, built from exp/log
+# rather than merely undoing LogStretch's own operations in reverse -- a
+# genuine two-independently-computed-formula round trip, unlike the
+# rotation-model round trips in this bank (AP-MODEL-002 included) which
+# recompute trig from the same negated angle. Precondition: 1e-2 <= a <= 1e6
+# (LogStretch's own docstring examples span 0.1-10000; very small a triggers
+# catastrophic cancellation in log(a*x+1) that is a precision limitation of
+# the formula itself, not a real drift between the two directions, so it is
+# excluded rather than absorbed into a much looser tolerance) and x in
+# [0, 1] (the stretch's documented domain). Tolerance: 1000*eps64 on
+# absolute error (not relative -- x can be exactly 0), derived from a
+# 50,000-trial sweep over a in [1e-2, 1e6], x in [0, 1] (worst observed
+# ~1.1e-14, a handful of ULPs).
+
+_AJ_TOL_ABS = 1000.0 * _EPS64
+_AJ_A_MIN = 1e-2
+_AJ_A_MAX = 1e6
+
+
+@_guard("log_stretch_inverse_roundtrip")
+def check_log_stretch_inverse_roundtrip(a, x_in, y_out):
+    """AP-VIS-001 (Candidate AJ): LogStretch(a) followed by its own
+    .inverse (InvertedLogStretch(a)) must recover the original input.
+    y_out is LogStretch.__call__'s own already-computed result for this
+    call; only the inverse direction is computed here.
+    """
+    import numpy as np
+
+    from astropy.visualization.stretch import InvertedLogStretch
+
+    if not (_AJ_A_MIN <= a <= _AJ_A_MAX):
+        return
+
+    x_arr = np.asarray(x_in, dtype=float)
+    y_arr = np.asarray(y_out, dtype=float)
+    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
+        return
+    if np.any(x_arr < 0) or np.any(x_arr > 1):
+        return
+
+    inv = InvertedLogStretch(a)
+    x_back = inv(y_arr.copy(), clip=False)
+    if not np.all(np.isfinite(x_back)):
+        return
+
+    abserr = float(np.max(np.abs(x_back - x_arr)))
+    trigger_if(abserr > _AJ_TOL_ABS, "AP-VIS-001")
