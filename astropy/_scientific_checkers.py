@@ -326,7 +326,7 @@ def check_time_arithmetic_inverse(t1, t2, delta):
 _F_TOL_PX = 1e-6
 
 
-_F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC"})
+_F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC", "HPX"})
 
 
 @_guard("wcs_projection_roundtrip")
@@ -354,13 +354,27 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     -- both wrap by exactly one full longitude turn (offset = 360 deg *
     px/deg, e.g. 36000.0 px at 100 px/deg), deterministic and reproducible,
     not noise. Same root cause (quad-cube facet disambiguation in wcslib's
-    Newton inversion), same fix: add both to the name exclusion set. All
-    three quad-cube projections are now excluded; the 24 non-quad-cube
-    standard projections (checked exhaustively, including the ones requiring
-    non-default PV parameters to avoid a wcsset ERROR 5) remain covered by
-    the law and stayed silent (worst observed error 5.8e-9 px, well within
-    tolerance). See LAW_CANDIDATES.md Candidate F's precondition-correction
-    note.
+    Newton inversion), same fix: add both to the name exclusion set.
+
+    Fixed again post-audit (2026-09-15, independent Opus-5 confirmatory
+    audit of the fix above): the generalization to "quad-cube family"
+    was along the wrong axis -- HPX (HEALPix), a facet-based but not
+    quad-cube projection, shares the identical discrete-pixel-jump
+    failure (confirmed: pixel (100,145) round-trips to (98,145), a clean
+    2.0 px jump, six decades past tolerance) and was not covered by the
+    quad-cube exclusion. Root cause is evidently facet/pixelization-based
+    projections generally, not quad-cube specifically; HPX added to the
+    exclusion set. A broader sweep of all 28 standard WCS projection
+    codes (including the 6 requiring explicit PV parameters to avoid a
+    wcsset ERROR 5) found no further failures -- HPX's own mirror
+    projection XPH stayed clean. Known remaining trade-off (not yet
+    addressed): TSC/QSC's blanket name exclusion loses real coverage in
+    their well-behaved inner region (round-trip error ~1e-9 to 1e-12 for
+    radius up to ~20px from the reference pixel, only failing past
+    ~45deg) -- unlike CSC, which fails already at 1px. A radius-based
+    rather than name-based gate could recover that coverage; not
+    implemented this round as the priority was closing the false
+    negative, not maximizing coverage.
     """
     import numpy as np
 
@@ -1051,6 +1065,29 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 # (~9x margin), no instability. Same fix pattern as Candidate R
 # (AP-STATS-004): gate on the data's own location/spread condition
 # number, computed from the array already in hand.
+#
+# That fix used `|median|/std(data)` as the condition number -- wrong
+# statistic, found by an independent Opus-5 confirmatory audit
+# (2026-09-15). `biweight_midvariance` normalizes residuals by
+# `c * MAD` (median absolute deviation), not by `std`: a handful of
+# realistic outliers (the exact scenario biweight estimators exist to be
+# robust against -- cosmic rays, bad pixels, a few bad measurements)
+# inflate `std` sharply without moving `MAD` at all, so `|median|/std`
+# can read as small (gate passes) while the estimator's actual
+# conditioning `|median|/MAD` is many orders of magnitude worse. An
+# independent re-sweep confirmed this at scale: 3 separate random
+# samples (2000-4000 trials each, distinct seeds/structures, realistic
+# baseline + 2 outlier magnitude/sign combinations) found a 35-71%
+# false-positive rate under the `std`-based gate -- an exact-arithmetic
+# cross-check (`Fraction`) confirmed these are checker false positives,
+# not real astropy defects (float64 agreed with exact arithmetic to the
+# last bit). Switched to `|median|/MAD`: on the same realistic-outlier
+# sweep, `MAD` correctly reads these as ill-conditioned (gate rejects,
+# worst false-positive ratio 0.0 among cases that still pass); re-ran
+# the original clean (no-outlier) 2,000-trial sweep with the new
+# statistic and found the same ~9x margin as before (worst ratio 0.05),
+# confirming the fix doesn't cost coverage on the case it was already
+# handling correctly.
 
 _Q_TOL = 1e-9
 _Q_SHIFT_RATIO_MAX = 1e3
@@ -1092,7 +1129,12 @@ def check_biweight_midvariance_equivariance(
     if not (np.isfinite(arr_std) and arr_std > 0):
         return
 
-    data_cond = abs(float(np.median(arr))) / arr_std
+    arr_median = float(np.median(arr))
+    arr_mad = float(np.median(np.abs(arr - arr_median)))
+    if not (np.isfinite(arr_mad) and arr_mad > 0):
+        return
+
+    data_cond = abs(arr_median) / arr_mad
     if data_cond > _Q_DATA_COND_MAX:
         return
 
@@ -1178,8 +1220,27 @@ def check_biweight_midvariance_equivariance(
 # _R_BIAS_MAG_MAX`. The std_err check needed no change -- confirmed
 # clean (se_relerr=0) on the exact falsifying repro; only the bias
 # check shares this blind spot.
+#
+# `_R_BIAS_MAG_MAX` fix itself found incomplete post-audit (2026-09-15,
+# independent Opus-5 confirmatory audit): the magnitude gate alone
+# doesn't bound `n` -- rounding error in the O(n) jackknife-fold
+# recomputation accumulates with the number of folds, not just their
+# magnitude. At `max|x|` pinned exactly at the 1e4 gate boundary, bias
+# stays clean through n~10,000 but exceeds `_R_BIAS_TOL` by 3.76x at
+# n=30,000 (independently reproduced). A direct sweep of
+# `bias/(eps64*n*max|x|)` (the natural scaling for round-off in an
+# n-term sum of that magnitude) found this ratio stays bounded --
+# noisy but with no growth trend -- across n from 10 to 30,000 and
+# mixed structures (worst observed ~1.5 over ~450 combined trials),
+# unlike the flat-tolerance model which necessarily fails as n grows
+# without bound. Fixed by replacing the fixed `_R_BIAS_TOL` with a
+# `max(fixed floor, C*eps64*n*max(1,max|x|))` tolerance -- the fixed
+# floor preserves sensitivity at small n (where the n-scaled term is
+# below machine-noise), the n-scaled term dominates and grows correctly
+# at large n. C=50 gives ~33x margin over the observed worst ratio.
 
 _R_BIAS_TOL = 1e-8
+_R_BIAS_TOL_C = 50.0
 _R_SE_TOL_C = 5.0
 _R_BIAS_MAG_MAX = 1e4
 
@@ -1219,7 +1280,11 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     max_abs_x = float(np.max(np.abs(arr))) if arr.size else 0.0
     if max_abs_x <= _R_BIAS_MAG_MAX:
         bias_scale = max(abs(xbar), 1.0)
-        trigger_if(abs(bias_val) / bias_scale > _R_BIAS_TOL, "AP-STATS-004")
+        bias_tol = max(
+            _R_BIAS_TOL,
+            _R_BIAS_TOL_C * _EPS64 * n * max(1.0, max_abs_x) / bias_scale,
+        )
+        trigger_if(abs(bias_val) / bias_scale > bias_tol, "AP-STATS-004")
 
     predicted_se = math.sqrt(float(np.sum((arr - xbar) ** 2)) / (n * (n - 1)))
     if predicted_se <= 0.0 or not math.isfinite(predicted_se):
