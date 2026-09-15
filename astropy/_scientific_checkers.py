@@ -393,8 +393,19 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     if not np.all(np.isfinite(recon)):
         return
 
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI):
+    # _F_TOL_PX was calibrated (see derivation note above) against pixel
+    # coordinates up to +/-2000px; it is an absolute tolerance with no
+    # magnitude scaling. A pixel coordinate at ~1e14 needs >20 significant
+    # digits to meet a 1e-6px absolute bound -- past float64's ~15-16 digit
+    # budget regardless of wcslib's accuracy, so this is a checker
+    # precondition gap (SANITIZER.md 5.8-P), not a wcslib defect. Scale the
+    # tolerance by pixel magnitude the same way AP-COORD-002/003 scale by
+    # vector norm, keeping the original absolute floor for ordinary
+    # (near-reference-pixel) coordinates.
+    pix_scale = float(np.max(np.abs(original_xy), initial=1.0))
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
-    trigger_if(err > _F_TOL_PX, "AP-WCS-001")
+    trigger_if(err > _F_TOL_PX * max(1.0, pix_scale), "AP-WCS-001")
 
 
 # --- Candidate G: all_world2pix's documented convergence contract ---------
@@ -1266,6 +1277,18 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     if not np.all(np.isfinite(arr)):
         return
 
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI): with a
+    # float32 `data` array, np.mean(arr) returns a float32 result by numpy's
+    # dtype-preservation rule, so jackknife_stats' bias/std_err are computed
+    # entirely at float32 (~1e-7 relative) precision -- not a defect in
+    # astropy, just numpy's ordinary dtype behavior. This checker's tolerance
+    # is derived from a float64 rounding-error model (SANITIZER.md 5.8-T) and
+    # has no basis at float32 precision, so a float32 input is outside this
+    # law's precondition, not a violation of it. Confirmed the checker fired
+    # this way on a 7-point float32 sample (bias/scale 3.5e-8 vs. tol 1e-8).
+    if arr.dtype != np.float64:
+        return
+
     try:
         bias_val = float(bias)
         se_val = float(std_err)
@@ -1761,6 +1784,27 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
     if not (math.isfinite(value) and math.isfinite(uncertainty)):
         return
     mod = caller_globals
+
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI): each
+    # sub-checker's law is stated for constants "from the *same vintage
+    # module*" (see e.g. _check_sigma_sb's docstring) -- a real astropy
+    # codata module, where sigma_sb/R/e_esu/M_sun/muB and their siblings
+    # are defined together by construction order. Checking only "the caller's
+    # globals happens to contain names h/k_B/c" is not that precondition: a
+    # test module (or any code) can construct a Constant directly and inject
+    # real sibling constants into its own globals() to spoof the same-module
+    # signal without those siblings having anything to do with the
+    # constant's actual value. Confirmed exploitable: a synthetic
+    # Constant("sigma_sb", ..., 1.0, ...) with h/k_B/c manually assigned into
+    # the calling module's globals() triggered all 5 sub-checkers although
+    # no astropy vintage module ever defines sigma_sb=1.0. Require the
+    # caller to actually be one of astropy's own codata modules.
+    mod_name = mod.get("__name__", "")
+    if not (
+        isinstance(mod_name, str)
+        and mod_name.startswith("astropy.constants.codata")
+    ):
+        return
 
     if abbrev == "sigma_sb" and system == "si":
         if "h" in mod and "k_B" in mod and "c" in mod:
@@ -2466,6 +2510,19 @@ def check_log_stretch_inverse_roundtrip(a, x_in, y_out):
     if not (_AJ_A_MIN <= a <= _AJ_A_MAX):
         return
 
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI):
+    # LogStretch.__call__ preserves the input array's dtype, so a float32
+    # x_in produces a float32 y_out computed entirely at ~1e-7 relative
+    # precision. This checker's absolute tolerance is derived from a
+    # float64 rounding model (SANITIZER.md 5.8-T) and has no basis at
+    # float32 precision -- the cast to `dtype=float` below is only for this
+    # checker's own comparison arithmetic and must not be used to decide
+    # whether the *production* computation ran at float64. Reject before
+    # that cast erases the evidence. Confirmed the checker fired this way
+    # on ordinary float32 input in [0, 1] (abserr ~1.2e-7 vs. tol ~2.2e-13).
+    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
+        return
+
     x_arr = np.asarray(x_in, dtype=float)
     y_arr = np.asarray(y_out, dtype=float)
     if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
@@ -2527,6 +2584,14 @@ def check_asinh_stretch_inverse_roundtrip(a, x_in, y_out):
     if a < _AK_A_MIN:
         return
 
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI): see
+    # the identical fix and rationale in check_log_stretch_inverse_roundtrip
+    # (AP-VIS-001) -- a float32 x_in/y_out means y_out was computed at
+    # float32 precision, which this checker's float64-derived tolerance has
+    # no basis to judge. Reject before the dtype=float cast below erases it.
+    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
+        return
+
     x_arr = np.asarray(x_in, dtype=float)
     y_arr = np.asarray(y_out, dtype=float)
     if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
@@ -2577,6 +2642,12 @@ def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
     if not (_AL_A_MIN <= abs(a) <= _AL_A_MAX):
         return
     if abs(a - 1.0) < _AL_A_EXCLUDE_RADIUS:
+        return
+
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI): see
+    # the identical fix and rationale in check_log_stretch_inverse_roundtrip
+    # (AP-VIS-001).
+    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
         return
 
     x_arr = np.asarray(x_in, dtype=float)
