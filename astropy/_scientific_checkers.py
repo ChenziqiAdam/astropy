@@ -1969,12 +1969,31 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
     """
     import math
 
+    import numpy as np
+
     from astropy.timeseries.periodograms.lombscargle._statistics import (
         fap_single,
     )
 
     if dK - dH != 2:
         return
+
+    # Fixed post black-box triggerability run (2026-09-15, codex CLI):
+    # inv_fap_single computes z = 1 - fap**(2/Nk) (or the analogous formula
+    # per normalization) preserving fap's own dtype throughout -- a
+    # float16 fap loses essentially all precision in this step (e.g.
+    # 1 - 1e-8 rounds to exactly 1.0 in float16), which fap_single's
+    # closed-form inverse then reports as a wildly different fap. Not an
+    # astropy defect: float16 in, float16-precision arithmetic out, per
+    # ordinary numpy dtype-preservation rules. This checker's tolerance is
+    # float64-derived (see the T-class note above) and has no basis to
+    # judge a float16 round-trip. Reject before the float() cast below
+    # erases the evidence.
+    fap_arr = np.asarray(fap)
+    z_arr = np.asarray(z)
+    if fap_arr.dtype != np.float64 or z_arr.dtype != np.float64:
+        return
+
     try:
         fap_val = float(fap)
         z_val = float(z)
