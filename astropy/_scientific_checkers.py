@@ -1099,10 +1099,42 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 # statistic and found the same ~9x margin as before (worst ratio 0.05),
 # confirming the fix doesn't cost coverage on the case it was already
 # handling correctly.
+#
+# `|median|/MAD` gate missed the `c`-scaling dimension, found via a
+# real user-facing false positive (2026-09-18, issue draft
+# "biweight_midvariance loses precision on data with a large common
+# offset and small spread"): a 16-point array with baseline
+# ~-7.8e5, MAD-scale scatter, and a non-default `c=1.635` (default is
+# 9.0) gave `|median|/MAD = 9.596e5`, just under the old
+# `_Q_DATA_COND_MAX = 1e6`, yet produced `relerr = 2.83e-9`, over the
+# `_Q_TOL = 1e-9` line. Root cause: the estimator normalizes residuals
+# by `c * MAD`, not by `MAD` alone (see u_i = (x_i - M) / (c * MAD) in
+# the docstring) -- `c` directly scales the outlier-rejection window, so
+# a smaller `c` narrows that window and makes the cancellation in `d
+# = data - M` bite harder for the same `|median|/MAD`. A 20,000-trial
+# sweep confirmed the old gate's false-positive rate at 643/10311
+# (~6.2%) once `c` is swept across [0.1, ~16] alongside the offset;
+# an exact-arithmetic (`Fraction`) cross-check on the issue's own input
+# confirmed float64 disagrees with exact arithmetic by exactly the
+# reported margin -- a genuine gate gap, not a re-confirmation of a
+# known astropy defect (there is none; see the mean-centering-fix note
+# above, which remains a suggestion, not evidence of a logic bug).
+# Switched the statistic to `|median| / (c * MAD)`, matching the
+# estimator's actual normalization; re-swept 200,000 trials (n 5-300,
+# baseline up to 1e8, scatter 1e-3 to 1e5, `c` in [~0.03, ~20], offset
+# per the existing `_Q_SHIFT_RATIO_MAX` gate) and found zero false
+# positives with the threshold tightened to 500 (worst observed relerr
+# 1.19e-10, an 8.4x margin to `_Q_TOL` -- consistent with the ~9x
+# margins elsewhere in this file). A scaled-tolerance model (`tol =
+# C * eps64 * n * max(1, cond)`, the pattern used for Candidate R) was
+# tried first and rejected: the worst-case ratio varied by >2 orders of
+# magnitude across the sweep with no stable `C`, so a hard gate at a
+# swept-safe threshold is the more reliable fix here, same as the
+# original `_Q_DATA_COND_MAX` design.
 
 _Q_TOL = 1e-9
 _Q_SHIFT_RATIO_MAX = 1e3
-_Q_DATA_COND_MAX = 1e6
+_Q_DATA_COND_MAX = 500.0  # threshold for |median| / (c * MAD), not |median| / MAD
 
 
 @_guard("biweight_scale_equivariance")
@@ -1145,7 +1177,11 @@ def check_biweight_midvariance_equivariance(
     if not (np.isfinite(arr_mad) and arr_mad > 0):
         return
 
-    data_cond = abs(arr_median) / arr_mad
+    # Condition number must be scaled by `c`: the estimator normalizes
+    # residuals by `c * MAD` (see u_i in the docstring), not by `MAD`
+    # alone, so a small `c` narrows the outlier-rejection window and
+    # makes cancellation bite harder for the same `|median|/MAD`.
+    data_cond = abs(arr_median) / (c * arr_mad)
     if data_cond > _Q_DATA_COND_MAX:
         return
 
