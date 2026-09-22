@@ -208,6 +208,7 @@ def check_frame_roundtrip_3d(orig_xyz, recon_xyz):
 # single-double day-precision floor of ~1.92e-11 s).
 
 _D_TOL_SEC = 5e-11
+_TIME_MAX_ABS_JD = 1e8  # ~274,000 years from the JD epoch
 _leap_table_range = None  # lazily cached (year_min, year_max) or a sentinel
 
 
@@ -245,6 +246,8 @@ def check_time_scale_roundtrip(original, converted, new_scale):
         return
     if new_scale == "ut1" or original.scale == "ut1":
         return
+    if abs(float(original.jd)) > _TIME_MAX_ABS_JD:
+        return
 
     year_min, year_max = _leap_table_year_range()
     if original.scale == "utc" or new_scale == "utc":
@@ -271,8 +274,8 @@ def check_time_scale_roundtrip(original, converted, new_scale):
 #
 # LAW_CANDIDATES.md Candidate E. Precondition: same leap-second-table
 # validity restriction as Candidate D when either epoch is UTC-involving;
-# otherwise unrestricted (no small/large-delta restriction -- checked, not
-# assumed, up to ~40-year separations). Tolerance: 5e-11 s, derived from a
+# restricted to |JD| <= 1e8 after a fresh-agent probe showed the fixed
+# tolerance is invalid at JD~1e9-1e12. Tolerance: 5e-11 s, derived from a
 # 20,000-trial sweep across 6 scales including a large-delta stress variant
 # (worst observed error 9.59e-12 s, no separation-magnitude dependence).
 
@@ -291,6 +294,12 @@ def check_time_arithmetic_inverse(t1, t2, delta):
     Candidate E -- same reasoning as Candidate D's array/masked exclusions).
     """
     if t1.shape != () or t2.shape != () or t1.masked or t2.masked:
+        return
+    # The 50-ps tolerance was derived for ordinary astronomical epochs, not
+    # arbitrarily large finite Julian dates.  Scale conversions contain rate
+    # terms referenced to fixed epochs; at |JD|~1e9 their float64 rounding
+    # floor alone exceeds this alarm threshold.
+    if max(abs(float(t1.jd)), abs(float(t2.jd))) > _TIME_MAX_ABS_JD:
         return
 
     year_min, year_max = _leap_table_year_range()
@@ -551,6 +560,17 @@ _I_TOL = 1e-6
 _CKMS = 299792.458  # speed of light in km/s, matches equivalencies.py's ckms
 
 
+def _doppler_rest_frequency_safe(rest_freq_hz):
+    """Whether squared frequency ratios stay in normal float64 range."""
+    import math
+    import sys
+
+    value = abs(float(rest_freq_hz))
+    lower = 16.0 * math.sqrt(sys.float_info.min)
+    upper = math.sqrt(sys.float_info.max) / 16.0
+    return math.isfinite(value) and lower <= value <= upper
+
+
 @_guard("doppler_convention_consistency")
 def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
     """AP-UNITS-002: the radio and relativistic Doppler conventions must
@@ -565,6 +585,9 @@ def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
     conversion for the same rest frequency, then probes both at a small
     set of nearby test frequencies spanning the beta precondition window.
     """
+    if not _doppler_rest_frequency_safe(rest_freq_hz):
+        return
+
     from astropy import units as u
     from astropy.units.equivalencies import doppler_relativistic
 
@@ -623,6 +646,9 @@ def check_doppler_redshift_consistency(rest_freq_hz, to_vel_freq_func):
     at a redshift independently derived from the same frequency ratio.
     """
     import math
+
+    if not _doppler_rest_frequency_safe(rest_freq_hz):
+        return
 
     from astropy.units.equivalencies import doppler_redshift
 
@@ -783,7 +809,10 @@ def check_separability_soundness(transform, matrix):
 # array-valued inv_efunc(z) calls are out of scope, same discipline as the
 # scalar-only restriction on AP-TIME-001/002). Tolerance 20*eps64, derived
 # from a 14,000-trial sweep (worst ratio 1.58*eps64) plus a 6,000-trial
-# massive-neutrino-path sweep (worst ratio 1.45*eps64).
+# massive-neutrino-path sweep (worst ratio 1.45*eps64). A later probe tuned
+# E(z)^2 arbitrarily close to zero, where this relative comparison is
+# ill-conditioned; the checker now scales by the component-sum condition
+# number and excludes conditions above eps64**-1/2.
 
 _L_TOL_C = 20.0
 
@@ -809,13 +838,37 @@ def check_inv_efunc_cross_implementation(cosmo, z):
     py_val = float(cosmo.inv_efunc(z_scalar))
     if not math.isfinite(py_val) or py_val == 0:
         return
+    # inv_efunc = 1/sqrt(sum of radiation, matter, curvature and dark-energy
+    # terms).  Negative curvature/density parameters can make that sum highly
+    # cancelling; the cross-implementation error then scales with its standard
+    # summation condition number rather than a flat 20 eps.
+    zp1 = z_scalar + 1.0
+    orad = cosmo.Ogamma0 + (
+        cosmo.Onu0
+        if not cosmo._nu_info.has_massive_nu
+        else cosmo.Ogamma0 * float(cosmo.nu_relative_density(z_scalar))
+    )
+    terms = (
+        orad * zp1**4,
+        cosmo.Om0 * zp1**3,
+        cosmo.Ok0 * zp1**2,
+        cosmo.Ode0 * float(cosmo.de_density_scale(z_scalar)),
+    )
+    if not all(math.isfinite(term) for term in terms):
+        return
+    total = math.fsum(terms)
+    if total == 0.0:
+        return
+    condition = max(1.0, math.fsum(abs(term) for term in terms) / abs(total))
+    if not math.isfinite(condition) or condition > _EPS64 ** -0.5:
+        return
 
     cy_val = float(cosmo._inv_efunc_scalar(z_scalar, *cosmo._inv_efunc_scalar_args))
     if not math.isfinite(cy_val):
         return
 
     relerr = abs(py_val - cy_val) / abs(py_val)
-    trigger_if(relerr > _L_TOL_C * _EPS64, "AP-COSMO-001")
+    trigger_if(relerr > _L_TOL_C * _EPS64 * condition, "AP-COSMO-001")
 
 
 # --- Candidate M: age/lookback-time complementarity ------------------------
@@ -1119,8 +1172,11 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 # reported margin -- a genuine gate gap, not a re-confirmation of a
 # known astropy defect (there is none; see the mean-centering-fix note
 # above, which remains a suggestion, not evidence of a logic bug).
-# Switched the statistic to `|median| / (c * MAD)`, matching the
-# estimator's actual normalization; re-swept 200,000 trials (n 5-300,
+# The normalized-residual condition is `|median| / (c * MAD)`, but a later
+# full-bank probe showed that using it alone lets c>>1 hide the independent
+# subtraction condition in `data - median(data)`.  The final statistic is
+# `|median| / (min(c,1) * MAD)`, the maximum of both condition numbers.
+# Re-swept 200,000 trials (n 5-300,
 # baseline up to 1e8, scatter 1e-3 to 1e5, `c` in [~0.03, ~20], offset
 # per the existing `_Q_SHIFT_RATIO_MAX` gate) and found zero false
 # positives with the threshold tightened to 500 (worst observed relerr
@@ -1134,7 +1190,7 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
 
 _Q_TOL = 1e-9
 _Q_SHIFT_RATIO_MAX = 1e3
-_Q_DATA_COND_MAX = 500.0  # threshold for |median| / (c * MAD), not |median| / MAD
+_Q_DATA_COND_MAX = 500.0
 
 
 @_guard("biweight_scale_equivariance")
@@ -1177,11 +1233,13 @@ def check_biweight_midvariance_equivariance(
     if not (np.isfinite(arr_mad) and arr_mad > 0):
         return
 
-    # Condition number must be scaled by `c`: the estimator normalizes
-    # residuals by `c * MAD` (see u_i in the docstring), not by `MAD`
-    # alone, so a small `c` narrows the outlier-rejection window and
-    # makes cancellation bite harder for the same `|median|/MAD`.
-    data_cond = abs(arr_median) / (c * arr_mad)
+    # Two conditioning mechanisms matter: subtracting the median depends on
+    # |median|/MAD regardless of c, while the normalized residual depends on
+    # |median|/(c*MAD) when c<1.  Using min(c, 1) covers both; the prior c*MAD
+    # gate incorrectly let huge c values hide catastrophic subtraction loss.
+    if not (np.isfinite(c) and c > 0):
+        return
+    data_cond = abs(arr_median) / (min(float(c), 1.0) * arr_mad)
     if data_cond > _Q_DATA_COND_MAX:
         return
 
@@ -1465,11 +1523,32 @@ def check_kernel_normalization(mode, pre_sum, array_sum, abs_sum, size):
 
 _T_TOL_C = 30.0
 _T_TOL_FLOOR = 50.0 * _EPS64
+_CONV_MAX_KERNEL_COND = _EPS64 ** -0.5
+
+
+def _convolution_kernel_condition(kernel_internal):
+    """L1/sum conditioning of normalization, or None outside its domain."""
+    import numpy as np
+
+    ker = np.asarray(kernel_internal, dtype=float)
+    if ker.size == 0 or not np.all(np.isfinite(ker)):
+        return None
+    kernel_sum = abs(float(np.sum(ker)))
+    kernel_l1 = float(np.sum(np.abs(ker)))
+    if not np.isfinite(kernel_l1) or kernel_sum == 0.0:
+        return None
+    return max(1.0, kernel_l1 / kernel_sum)
 
 
 @_guard("convolution_flux_conservation")
 def check_convolution_flux_conservation(
-    array_internal, result, boundary, normalize_kernel, nan_treatment, mask
+    array_internal,
+    kernel_internal,
+    result,
+    boundary,
+    normalize_kernel,
+    nan_treatment,
+    mask,
 ):
     """AP-CONV-002: convolve(array, kernel, boundary='wrap',
     normalize_kernel=True).sum() == array.sum() (LAW_CANDIDATES.md
@@ -1483,7 +1562,13 @@ def check_convolution_flux_conservation(
 
     if boundary != "wrap" or not normalize_kernel or mask is not None:
         return
+    kernel_cond = _convolution_kernel_condition(kernel_internal)
+    if kernel_cond is None or kernel_cond > _CONV_MAX_KERNEL_COND:
+        return
     arr = np.asarray(array_internal)
+    ker = np.asarray(kernel_internal)
+    if arr.ndim != ker.ndim or any(ks > as_ for ks, as_ in zip(ker.shape, arr.shape)):
+        return
     if not np.all(np.isfinite(arr)):
         return
     res = np.asarray(result)
@@ -1494,6 +1579,7 @@ def check_convolution_flux_conservation(
     after = float(res.sum())
     scale = max(1.0, float(np.max(np.abs(arr), initial=0.0)))
     tol = max(_T_TOL_FLOOR, _T_TOL_C * _EPS64 * math.sqrt(arr.size))
+    tol *= kernel_cond
     trigger_if(abs(after - before) > tol * scale, "AP-CONV-002")
 
 
@@ -1562,6 +1648,9 @@ def check_convolution_cross_implementation(
         return
     if not np.all(np.isfinite(ker)):
         return
+    kernel_cond = _convolution_kernel_condition(ker)
+    if kernel_cond is None or kernel_cond > _CONV_MAX_KERNEL_COND:
+        return
     if not (np.all(np.isfinite(arr)) or nan_treatment == "interpolate"):
         return
 
@@ -1587,7 +1676,13 @@ def check_convolution_cross_implementation(
 
     diff = np.max(np.abs(res[finite_mask] - fft_res[finite_mask]))
     scale = max(1.0, float(np.max(np.abs(arr[np.isfinite(arr)]), initial=0.0)))
-    trigger_if(float(diff) > _U_TOL * scale, "AP-CONV-003")
+    # Direct summation contributes O(kernel.size) rounding while the FFT path
+    # contributes O(log(array.size)); both are amplified by normalization.
+    size_factor = max(float(ker.size), float(np.log2(arr.size)), 1.0)
+    trigger_if(
+        float(diff) > _U_TOL * kernel_cond * size_factor * scale,
+        "AP-CONV-003",
+    )
 
 
 # --- Candidates V/W/X/Y: astropy.constants cross-constant relations --------
@@ -2448,6 +2543,9 @@ def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz)
     conversion for the same rest frequency, then probes both at a small
     set of nearby test frequencies spanning the beta precondition window.
     """
+    if not _doppler_rest_frequency_safe(rest_freq_hz):
+        return
+
     from astropy import units as u
     from astropy.units.equivalencies import doppler_relativistic
 

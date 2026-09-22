@@ -450,7 +450,13 @@ def convolve(
     if _scientific_checkers.enabled():
         try:
             _scientific_checkers.check_convolution_flux_conservation(
-                array_internal, result, boundary, normalize_kernel, nan_treatment, mask
+                array_internal,
+                kernel_internal,
+                result,
+                boundary,
+                normalize_kernel,
+                nan_treatment,
+                mask,
             )
         except Exception:
             pass

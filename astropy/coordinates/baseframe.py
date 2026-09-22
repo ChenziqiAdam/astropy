@@ -1507,12 +1507,7 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
             try:
                 orig = self.represent_as(r.UnitSphericalRepresentation)
                 recon = result.represent_as(r.UnitSphericalRepresentation)
-                _scientific_checkers.check_frame_roundtrip_angular(
-                    float(u.Quantity(orig.lon).to_value(u.rad)),
-                    float(u.Quantity(orig.lat).to_value(u.rad)),
-                    float(u.Quantity(recon.lon).to_value(u.rad)),
-                    float(u.Quantity(recon.lat).to_value(u.rad)),
-                )
+                coordinate_scale_safe = True
                 if self.data is not None and not isinstance(
                     self.data, r.UnitSphericalRepresentation
                 ):
@@ -1525,9 +1520,23 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
                     unit = orig_cart.x.unit
                     orig_xyz = orig_cart.xyz.to_value(unit)
                     recon_xyz = recon_cart.xyz.to_value(unit)
-                    _scientific_checkers.check_frame_roundtrip_3d(
-                        tuple(float(x) for x in orig_xyz),
-                        tuple(float(x) for x in recon_xyz),
+                    max_component = float(np.max(np.abs(orig_xyz)))
+                    coordinate_scale_safe = (
+                        np.all(np.isfinite(orig_xyz))
+                        and np.all(np.isfinite(recon_xyz))
+                        and 1e-150 <= max_component <= 1e150
+                    )
+                    if coordinate_scale_safe:
+                        _scientific_checkers.check_frame_roundtrip_3d(
+                            tuple(float(x) for x in orig_xyz),
+                            tuple(float(x) for x in recon_xyz),
+                        )
+                if coordinate_scale_safe:
+                    _scientific_checkers.check_frame_roundtrip_angular(
+                        float(u.Quantity(orig.lon).to_value(u.rad)),
+                        float(u.Quantity(orig.lat).to_value(u.rad)),
+                        float(u.Quantity(recon.lon).to_value(u.rad)),
+                        float(u.Quantity(recon.lat).to_value(u.rad)),
                     )
             except Exception:
                 pass
