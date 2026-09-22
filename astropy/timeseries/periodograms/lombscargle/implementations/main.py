@@ -253,6 +253,7 @@ def lombscargle(
                     nterms,
                     normalization,
                     PLS,
+                    method_kwds,
                 )
             except Exception:
                 pass

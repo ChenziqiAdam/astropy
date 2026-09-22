@@ -1959,8 +1959,8 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
 #
 # Fixed post-audit (2026-09-14, independent audit finding): the original
 # design used a single absolute tolerance (1e-6) on the reasoning that
-# "power is intrinsically bounded" -- true only for normalization in
-# {standard, model, log}, whose power is O(1) and dimensionless. For
+# "power is intrinsically bounded" -- true for standard power, but not for
+# psd (dimensional) or model/log near standard power 1. For
 # normalization='psd', power is dimensional (units of amplitude-squared per
 # frequency) and can be arbitrarily large (e.g. a Kepler-style light curve
 # in electrons/s with amplitude ~1e5 gives psd power ~1e10) -- an absolute
@@ -1969,19 +1969,32 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
 # agreement between fast and slow is stable at ~1e-11 to 1e-14 across every
 # normalization and every amplitude tested, confirming the two
 # implementations genuinely agree and only the tolerance model was wrong.
-# Fixed by keeping the absolute check for the three O(1)-bounded
-# normalizations (as originally designed, still the tighter and more
-# meaningful check there) and adding a relative check for 'psd' specifically.
+# Fixed first for psd with a relative check, then for model/log by mapping
+# them algebraically back to the bounded standard-power representation.
 #
-# Tolerance: 1e-6 absolute for standard/model/log, derived from two
-# independent 500-trial sweeps (worst 7.30e-11 and 2.42e-10) plus a 300-trial
-# post-fix re-sweep spanning amplitudes 1e-6 to 1e6 (worst 1.6e-12 for these
-# three normalizations) -- fast's FFT/extirpolation scheme is a genuine
-# bounded approximation to slow's exact sum, not an alternative exact
-# evaluation, so eps64-scale agreement is not expected (unlike every prior
-# cross-implementation candidate in this bank). 1e-6 relative for 'psd',
+# Tolerance: 1e-6 absolute after mapping standard/model/log to the bounded
+# standard-power scale, derived from two independent 500-trial sweeps (worst
+# 7.30e-11 and 2.42e-10) plus a 300-trial post-fix re-sweep spanning amplitudes
+# 1e-6 to 1e6 (worst 1.6e-12).  Model and log power themselves are unbounded
+# near standard power 1, so comparing them directly with a fixed absolute
+# threshold would be invalid.  Fast's FFT/NUFFT scheme is a genuine bounded
+# approximation to slow's direct sum, not an alternative exact evaluation.
+# 1e-6 relative for 'psd',
 # derived from the same 300-trial sweep (worst relative error 3.57e-10
 # across all four normalizations combined) -- ~2700x margin.
+#
+# A 2026-09-22 fresh-suite witness exposed a second missing precondition:
+# 154 observations in a 1e-8-relative-width cluster plus one distant point
+# produce cond(X)=5.98e5 (cond(X.T X)=3.57e11). Tightening LRA eps from 5e-13
+# to 1e-14 reduced the apparent fast/slow gap from 7.53e-6 to 1.58e-7, the
+# same scale as slow/cython/chi2 disagreement. A 270-case clustered-sampling
+# sweep found the first >1e-6 discrepancy only at cond(X)=7.95e4; restricting
+# comparisons to cond(X)<=1e4 left a worst 2.28e-8 (~44x margin).
+# The same suite also contained offset-dominated data and grids reaching
+# 1e12 phase cycles. Those independently stress mean subtraction and sin/cos
+# argument reduction; cap |mean|/weighted_rms at 1e8 and
+# max_frequency*ptp(t) at 1e8, where targeted sweeps retained >40x and >70x
+# margin respectively.
 #
 # Re-deriving via method='slow' is O(N * Nfreq), the same cost class as
 # AP-CONV-003's re-call to convolve_fft -- capped by problem size (not by
@@ -1993,19 +2006,107 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
 _Z_TOL_ABS = 1e-6
 _Z_TOL_REL = 1e-6
 _Z_MAX_COST = 2_000_000  # N * Nfreq
+_Z_MAX_DESIGN_COND = 1e4
+_Z_MAX_DATA_COND = 1e8
+_Z_MAX_PHASE_CYCLES = 1e8
+
+
+def _lombscargle_stable_frequency_mask(
+    t, y, dy, frequency, center_data, fit_mean
+):
+    """Return frequencies whose weighted sinusoid fit is well-conditioned.
+
+    The fast backend approximates trigonometric sums; solving the subsequent
+    least-squares problem amplifies that error by the condition of the design
+    matrix.  A clustered-times witness had cond(X)=5.98e5 and cond(X.T X)=
+    3.57e11: tightening the LRA sum tolerance removed the reported mismatch,
+    while even the three direct implementations disagreed at ~2e-7.  The
+    checker also bounds loss in mean subtraction and trigonometric argument
+    reduction. Such inputs cannot support a fixed 1e-6 error model.
+    """
+    import numpy as np
+
+    t_arr = np.asarray(t, dtype=float).ravel()
+    freq = np.asarray(frequency, dtype=float).ravel()
+    if t_arr.size < (3 if fit_mean else 2):
+        return np.zeros(freq.shape, dtype=bool)
+    if not np.all(np.isfinite(t_arr)) or not np.all(np.isfinite(freq)):
+        return np.zeros(freq.shape, dtype=bool)
+
+    if dy is None:
+        weights = np.ones(t_arr.size, dtype=float)
+    else:
+        dy_arr = np.broadcast_to(np.asarray(dy, dtype=float), t_arr.shape)
+        if not np.all(np.isfinite(dy_arr)) or np.any(dy_arr <= 0):
+            return np.zeros(freq.shape, dtype=bool)
+        weights = dy_arr**-2
+    weights /= weights.sum()
+    sqrt_weights = np.sqrt(weights)
+
+    y_arr = np.asarray(y, dtype=float).ravel()
+    if y_arr.shape != t_arr.shape or not np.all(np.isfinite(y_arr)):
+        return np.zeros(freq.shape, dtype=bool)
+    if center_data or fit_mean:
+        mean = float(np.dot(weights, y_arr))
+        spread = float(np.sqrt(np.dot(weights, (y_arr - mean) ** 2)))
+        if spread == 0.0 or abs(mean) / spread > _Z_MAX_DATA_COND:
+            return np.zeros(freq.shape, dtype=bool)
+
+    # Argument reduction of sin/cos also loses precision when the number of
+    # phase cycles across the observation baseline is enormous.
+    phase_cycles = np.abs(freq) * float(np.ptp(t_arr))
+    stable = np.isfinite(phase_cycles) & (phase_cycles <= _Z_MAX_PHASE_CYCLES)
+    # Batch to keep the checker bounded near its N*Nfreq cost ceiling.
+    for start in range(0, freq.size, 256):
+        stop = min(start + 256, freq.size)
+        phase = 2.0 * np.pi * freq[start:stop, None] * t_arr[None, :]
+        columns = [np.cos(phase), np.sin(phase)]
+        if fit_mean:
+            columns.insert(0, np.ones_like(phase))
+        design = np.stack(columns, axis=-1) * sqrt_weights[None, :, None]
+        condition = np.linalg.cond(design)
+        stable[start:stop] &= np.isfinite(condition) & (
+            condition <= _Z_MAX_DESIGN_COND
+        )
+    return stable
+
+
+def _lombscargle_standard_power(power, normalization):
+    """Map dimensionless normalizations back to bounded standard power."""
+    import numpy as np
+
+    value = np.asarray(power)
+    if normalization == "standard":
+        return value
+    if normalization == "model":
+        return value / (1.0 + value)
+    if normalization == "log":
+        return -np.expm1(-value)
+    return None
 
 
 @_guard("lombscargle_cross_implementation")
 def check_lombscargle_cross_implementation(
-    t, y, dy, frequency, center_data, fit_mean, nterms, normalization, power
+    t,
+    y,
+    dy,
+    frequency,
+    center_data,
+    fit_mean,
+    nterms,
+    normalization,
+    power,
+    method_kwds=None,
 ):
     """AP-TS-001 (Candidate Z): LombScargle.power(..., method='fast') must
     agree with method='slow' on the same inputs, within fast's own
     documented approximation budget (not eps64 -- fast is an approximate
     FFT/extirpolation scheme, slow is the exact direct sum). Absolute
-    tolerance for the three O(1)-bounded normalizations (standard, model,
-    log); relative tolerance for 'psd', whose power is dimensional and can
-    be arbitrarily large or small depending on the input amplitude.
+    tolerance on the bounded standard-power representation of the three
+    dimensionless normalizations; relative tolerance for 'psd', whose power
+    is dimensional and can be arbitrarily large or small depending on the
+    input amplitude. Ill-conditioned sinusoid fits are outside the fixed
+    approximation-error model.
     """
     import numpy as np
 
@@ -2014,6 +2115,17 @@ def check_lombscargle_cross_implementation(
     )
 
     if nterms != 1:
+        return
+    # The tolerance was calibrated for the default LRA backend.  ``fast``
+    # also exposes the deliberately less accurate FASPER backend and custom
+    # approximation controls; those are distinct numerical contracts.
+    method_kwds = dict(method_kwds or {})
+    if method_kwds.get("algorithm", "lra") != "lra":
+        return
+    if method_kwds.get("use_fft", True) is not True:
+        return
+    trig_sum_kwds = dict(method_kwds.get("trig_sum_kwds") or {})
+    if float(trig_sum_kwds.get("eps", 5e-13)) > 5e-13:
         return
     freq = np.asarray(frequency)
     if freq.ndim != 1 or freq.size < 2:
@@ -2047,12 +2159,24 @@ def check_lombscargle_cross_implementation(
     if slow_power.shape != power_arr.shape or not np.all(np.isfinite(slow_power)):
         return
 
-    diff = float(np.max(np.abs(power_arr - slow_power)))
+    stable = _lombscargle_stable_frequency_mask(
+        t_arr, y_arr, dy_arr, freq, center_data, fit_mean
+    )
+    if not np.any(stable):
+        return
+
     if normalization == "psd":
-        denom = np.maximum(np.abs(slow_power), 1e-300)
-        relerr = float(np.max(np.abs(power_arr - slow_power) / denom))
+        denom = np.maximum(np.abs(slow_power[stable]), 1e-300)
+        relerr = float(
+            np.max(np.abs(power_arr[stable] - slow_power[stable]) / denom)
+        )
         trigger_if(relerr > _Z_TOL_REL, "AP-TS-001")
     else:
+        bounded_power = _lombscargle_standard_power(power_arr, normalization)
+        bounded_slow = _lombscargle_standard_power(slow_power, normalization)
+        if bounded_power is None or bounded_slow is None:
+            return
+        diff = float(np.max(np.abs(bounded_power[stable] - bounded_slow[stable])))
         trigger_if(diff > _Z_TOL_ABS, "AP-TS-001")
 
 

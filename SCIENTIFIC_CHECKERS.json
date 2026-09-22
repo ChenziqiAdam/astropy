@@ -316,12 +316,12 @@
       "symbol": "M_sun, M_jup, M_earth"
     },
     {
-      "alarm": "absolute power disagreement exceeds 1e-6 for normalization in {standard, model, log}; relative disagreement exceeds 1e-6 for normalization='psd'",
+      "alarm": "absolute disagreement exceeds 1e-6 after mapping {standard, model, log} to bounded standard power; relative disagreement exceeds 1e-6 for normalization='psd'",
       "family": "lombscargle_cross_implementation",
       "id": "AP-TS-001",
       "invariant": "power computed via method=\"fast\" agrees with method=\"slow\" (the exact direct-sum reference implementation) within fast's own documented FFT/extirpolation approximation budget",
       "observation_point": "end of lombscargle() in implementations/main.py, after the resolved-method result is computed, when the resolved method is \"fast\"",
-      "precondition": "nterms=1, regular frequency grid, N*Nfreq <= 2,000,000",
+      "precondition": "nterms=1, regular frequency grid, N*Nfreq <= 2,000,000; default LRA fast backend with eps<=5e-13; |weighted_mean(y)|/weighted_rms(y-mean)<=1e8 when centering; comparison restricted per frequency to weighted sinusoid design-matrix condition <=1e4 and abs(frequency)*ptp(t)<=1e8 phase cycles",
       "rationale": "six independently coded LombScargle implementations are documented to compute the identical scientific quantity; slow exists specifically as the exact reference the others approximate or restate",
       "scientific_quantity": "Lomb-Scargle periodogram power at a given frequency",
       "source": "astropy/timeseries/periodograms/lombscargle/implementations/main.py",
