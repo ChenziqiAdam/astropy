@@ -208,7 +208,7 @@ def check_frame_roundtrip_3d(orig_xyz, recon_xyz):
 # single-double day-precision floor of ~1.92e-11 s).
 
 _D_TOL_SEC = 5e-11
-_TIME_MAX_ABS_JD = 1e8  # ~274,000 years from the JD epoch
+_TIME_MAX_ABS_JD = 1e7  # ~27,000 years from the JD epoch; the TCB/TCG rate terms reach the 50 ps alarm floor near 1e8
 _leap_table_range = None  # lazily cached (year_min, year_max) or a sentinel
 
 
@@ -333,9 +333,43 @@ def check_time_arithmetic_inverse(t1, t2, delta):
 # rounding is less predictable a priori than pure-Python chains.
 
 _F_TOL_PX = 1e-6
+# Pixel offsets this large correspond to world offsets of many full turns for any
+# realistic plate scale; the projection inverse is not single-valued there.
+_F_MAX_ABS_PIXEL = 1e6
 
 
-_F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC", "HPX"})
+_F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC", "HPX", "NCP"})
+# NCP (deprecated; wcslib evaluates it as slant orthographic) inverts through a
+# quadratic whose conditioning degrades like sqrt(eps64) near the reference
+# point: at 3.6 mas/pixel its round trip errs by ~6e-3 px, five orders worse
+# than SIN/TAN/STG at the same scale (measured 2026-10-01). That is angular
+# accuracy ~2e-5 arcsec, a conditioning limit of the projection, not a
+# violation of the pixel/world inverse contract at realistic precision.
+
+_F_MAX_PLANE_RADIANS = 100.0
+
+
+def _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=True):
+    """True when the pixel/world inverse is ill-conditioned by construction:
+    the projected-plane offset is so large (many radians) that the world
+    coordinate no longer carries the pixel to float64 precision, or the
+    projection is in the excluded set."""
+    import math
+
+    import numpy as np
+
+    ctype = getattr(wcs_obj.wcs, "ctype", None)
+    if excluded_by_name and ctype is not None and any(
+        str(c).strip()[-3:] in _F_EXCLUDED_PROJECTIONS for c in ctype
+    ):
+        return True
+    try:
+        scale = float(np.max(np.abs(np.asarray(wcs_obj.pixel_scale_matrix))))
+        crpix = np.asarray(wcs_obj.wcs.crpix, dtype=float)
+        offset = float(np.max(np.abs(np.asarray(original_xy, dtype=float) - crpix)))
+    except Exception:
+        return False
+    return offset * scale * math.pi / 180.0 > _F_MAX_PLANE_RADIANS
 
 
 @_guard("wcs_projection_roundtrip")
@@ -413,6 +447,10 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     # vector norm, keeping the original absolute floor for ordinary
     # (near-reference-pixel) coordinates.
     pix_scale = float(np.max(np.abs(original_xy), initial=1.0))
+    if pix_scale > _F_MAX_ABS_PIXEL or _wcs_outside_projection_domain(
+        wcs_obj, original_xy, excluded_by_name=False
+    ):
+        return
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
     trigger_if(err > _F_TOL_PX * max(1.0, pix_scale), "AP-WCS-001")
 
@@ -452,6 +490,11 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     if original_xy.size == 0 or world.size == 0:
         return
     if not (np.all(np.isfinite(original_xy)) and np.all(np.isfinite(world))):
+        return
+
+    if float(
+        np.max(np.abs(original_xy), initial=0.0)
+    ) > _F_MAX_ABS_PIXEL or _wcs_outside_projection_domain(wcs_obj, original_xy):
         return
 
     default_tolerance = 1e-4
@@ -560,10 +603,38 @@ _I_TOL = 1e-6
 _CKMS = 299792.458  # speed of light in km/s, matches equivalencies.py's ckms
 
 
+def all_float64(*objs):
+    """False if any argument carries a floating dtype other than float64.
+
+    The checker tolerances are derived from float64 arithmetic (see the T-class
+    notes); a float16/float32 input legitimately produces float16/float32
+    precision output, which is not an astropy defect and which these tolerances
+    have no basis to judge. Plain Python numbers and integer arrays pass.
+    """
+    import numpy as np
+
+    for obj in objs:
+        if obj is None:
+            continue
+        dtype = getattr(obj, "dtype", None)
+        if dtype is None:
+            try:
+                dtype = np.asarray(getattr(obj, "value", obj)).dtype
+            except Exception:
+                continue
+        if np.issubdtype(dtype, np.floating) and dtype != np.float64:
+            return False
+    return True
+
+
 def _doppler_rest_frequency_safe(rest_freq_hz):
-    """Whether squared frequency ratios stay in normal float64 range."""
+    """Whether squared frequency ratios stay in normal float64 range (and the
+    rest frequency is float64: float32 rounding is not a Doppler-law violation)."""
     import math
     import sys
+
+    if not all_float64(rest_freq_hz):
+        return False
 
     value = abs(float(rest_freq_hz))
     lower = 16.0 * math.sqrt(sys.float_info.min)
@@ -707,6 +778,8 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
     """
     from astropy.units.equivalencies import brightness_temperature, spectral
 
+    if not all_float64(frequency_q, t_cmb_q):
+        return
     bright_equiv = brightness_temperature(frequency_q)
     convert_jysr_to_k_bright = None
     for row in bright_equiv:
@@ -727,7 +800,9 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
     if t_cmb_k <= 0:
         return
     x = (_K_H * freq_hz) / (_K_KB * t_cmb_k)
-    if not (0 < x < _K_X_MAX):
+    # x**2 must stay a normal float64 (x < ~1e-154 underflows by ordinary
+    # arithmetic, e.g. T_cmb ~ 1e150 K); 1e-100 leaves a wide margin.
+    if not (1e-100 < x < _K_X_MAX):
         return
 
     ratio = t_bright_k / t_thermo_k
@@ -848,11 +923,12 @@ def check_inv_efunc_cross_implementation(cosmo, z):
         if not cosmo._nu_info.has_massive_nu
         else cosmo.Ogamma0 * float(cosmo.nu_relative_density(z_scalar))
     )
+    de_scale = float(cosmo.de_density_scale(z_scalar))
     terms = (
         orad * zp1**4,
         cosmo.Om0 * zp1**3,
         cosmo.Ok0 * zp1**2,
-        cosmo.Ode0 * float(cosmo.de_density_scale(z_scalar)),
+        cosmo.Ode0 * de_scale,
     )
     if not all(math.isfinite(term) for term in terms):
         return
@@ -867,8 +943,15 @@ def check_inv_efunc_cross_implementation(cosmo, z):
     if not math.isfinite(cy_val):
         return
 
+    # A power x**p carries relative rounding ~eps*|p ln x|; at large z the
+    # (1+z)**p and dark-energy scale terms have |ln(term)| of tens to hundreds,
+    # so a flat 20 eps is below the arithmetic's own precision floor there.
+    pow_cond = 1.0
+    for factor in (zp1**4, de_scale):
+        if math.isfinite(factor) and factor > 0:
+            pow_cond = max(pow_cond, abs(math.log(factor)))
     relerr = abs(py_val - cy_val) / abs(py_val)
-    trigger_if(relerr > _L_TOL_C * _EPS64 * condition, "AP-COSMO-001")
+    trigger_if(relerr > _L_TOL_C * _EPS64 * condition * pow_cond, "AP-COSMO-001")
 
 
 # --- Candidate M: age/lookback-time complementarity ------------------------
@@ -954,7 +1037,7 @@ _C_TOL = 10.0 * _EPS64
 
 
 @_guard("triangle_inequality")
-def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac):
+def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
     """AP-COORD-004: great-circle separation is a metric, so for any three
     points A, B, C on the sphere: separation(A, C) <= separation(A, B) +
     separation(B, C). This must hold unconditionally; a violation means
@@ -974,6 +1057,11 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac):
 
     from astropy.coordinates.angles.utils import angular_separation
 
+    # The 10*eps64 tolerance is float64-derived; float32 coordinates carry
+    # float32 rounding (near-antipodal separations differ by ~1e-7), which is
+    # not a metric violation. The hook reports the caller's dtype.
+    if not float64:
+        return
     lonB = (lonA + lonC) / 2.0 + math.pi / 2.0
     latB = max(-math.pi / 2.0, min(math.pi / 2.0, (latA + latC) / 2.0))
 
@@ -1025,9 +1113,15 @@ def check_circstd_circvar_consistency(data, axis, weights, circular_value):
     if resultant <= 0:
         return
 
+    if resultant >= 1.0:
+        return
+    # circvar = 1 - R carries absolute error ~eps64, so ln(R) is conditioned as
+    # eps64 / (R |ln R|): near R -> 0 (log diverges) and near R -> 1 (cancellation)
+    # the comparison is outside this tolerance model.
+    cond = max(1.0, 1.0 / (resultant * abs(math.log(resultant))))
     predicted = math.sqrt(-2.0 * math.log(resultant))
     relerr = abs(result_val - predicted) / max(abs(predicted), 1e-300)
-    trigger_if(relerr > _O_TOL_C * _EPS64, "AP-STATS-001")
+    trigger_if(relerr > _O_TOL_C * _EPS64 * cond, "AP-STATS-001")
 
 
 # --- Candidate P: biweight_location affine equivariance ---------------------
@@ -1076,7 +1170,11 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
         return
 
     predicted = a * base + b
-    scale = max(abs(predicted), abs(other_val), 1.0)
+    # a*x + b is rounded with absolute error ~eps*max|a*x + b|; when the true
+    # location is near 0 for widely spread data, a purely relative comparison
+    # against the (tiny) result is below the arithmetic's own precision floor.
+    data_mag = float(np.max(np.abs(transformed)))
+    scale = max(abs(predicted), abs(other_val), 1.0, data_mag)
     relerr = abs(other_val - predicted) / scale
     trigger_if(relerr > _P_TOL, "AP-STATS-002")
 
@@ -1241,6 +1339,12 @@ def check_biweight_midvariance_equivariance(
         return
     data_cond = abs(arr_median) / (min(float(c), 1.0) * arr_mad)
     if data_cond > _Q_DATA_COND_MAX:
+        return
+    # A point exactly on the rejection edge |u| = 1 is counted or not by
+    # rounding alone (the window is a step function), so n jumps by one under
+    # a*x + b; the law applies away from the edge.
+    u_abs = np.abs(arr - arr_median) / (float(c) * arr_mad)
+    if np.any(np.abs(u_abs - 1.0) < 1e-9):
         return
 
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
@@ -1652,6 +1756,13 @@ def check_convolution_cross_implementation(
     if kernel_cond is None or kernel_cond > _CONV_MAX_KERNEL_COND:
         return
     if not (np.all(np.isfinite(arr)) or nan_treatment == "interpolate"):
+        return
+    # NaN interpolation renormalizes by the kernel sum over the *valid*
+    # neighbours. For a signed kernel those partial sums can be arbitrarily
+    # close to zero even when the full kernel is well conditioned, so the two
+    # implementations are amplified without bound; interpolation is defined
+    # for non-negative kernels.
+    if not np.all(np.isfinite(arr)) and np.any(ker < 0):
         return
 
     try:
@@ -2116,6 +2227,10 @@ def check_lombscargle_cross_implementation(
 
     if nterms != 1:
         return
+    # Tolerance is float64-derived: a float32 y/dy/t legitimately gives
+    # float32-precision power (~1e-5), not a fast-vs-slow disagreement.
+    if not all_float64(t, y, dy, frequency):
+        return
     # The tolerance was calibrated for the default LRA backend.  ``fast``
     # also exposes the deliberately less accurate FASPER backend and custom
     # approximation controls; those are distinct numerical contracts.
@@ -2261,6 +2376,11 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
     if not (isinstance(N, (int,)) or float(N).is_integer()):
         return
     if N <= dK or N > _AB_MAX_N:
+        return
+    # z = 1 - fap**(2/(N-dK)) (standard form) saturates at exactly 1.0 once
+    # fap**(2/(N-dK)) falls below float64 resolution (e.g. N=4, fap < 1e-6),
+    # so the inverse cannot recover fap by ordinary rounding.
+    if fap_val ** (2.0 / (N - dK)) < 1e4 * _EPS64:
         return
 
     try:
@@ -2531,6 +2651,17 @@ def check_spherical_differential_coslat_roundtrip(
     from astropy.coordinates.representation.spherical import SphericalDifferential
 
     if base is None:
+        return
+    try:
+        if not all_float64(
+            self_differential.d_lon,
+            self_differential.d_lat,
+            self_differential.d_distance,
+            base.lon,
+            base.lat,
+        ):
+            return
+    except Exception:
         return
 
     try:

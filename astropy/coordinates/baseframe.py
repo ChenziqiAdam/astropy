@@ -2126,6 +2126,9 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
                     float(u.Quantity(lon2).to_value(u.rad)),
                     float(u.Quantity(lat2).to_value(u.rad)),
                     float(u.Quantity(sep_rad).to_value(u.rad)),
+                    float64=_scientific_checkers.all_float64(
+                        u.Quantity(lon1), u.Quantity(lat1), u.Quantity(lon2), u.Quantity(lat2)
+                    ),
                 )
             except Exception:
                 pass
