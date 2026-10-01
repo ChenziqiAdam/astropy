@@ -218,8 +218,13 @@ def _leap_table_year_range():
         from astropy.utils import iers
 
         table = iers.LeapSeconds.auto_open()
+        # Only the post-1972 integer-leap-second era is in scope: before it UTC
+        # is a rate-offset ("rubber second") scale whose own conversions reach
+        # ~1 ns at the rate-change instants, far above the 50 ps alarm, and the
+        # loaded table's start year (1960 or 1972) depended on whether the
+        # auto-update had already run, making the precondition order-dependent.
         _leap_table_range = (
-            int(table["year"].min()),
+            max(1972, int(table["year"].min())),
             int(table["year"].max()),
         )
     return _leap_table_range
@@ -295,6 +300,22 @@ def check_time_arithmetic_inverse(t1, t2, delta):
     """
     if t1.shape != () or t2.shape != () or t1.masked or t2.masked:
         return
+    # The TDB-TT offset depends on the observer location (up to ~2 us), so
+    # T2 - T1 and T1 + delta are only the same instant arithmetic when both
+    # operands share one location (or both have none).
+    if (t1.location is None) != (t2.location is None):
+        return
+    if t1.location is not None:
+        try:
+            import numpy as np
+
+            if not np.array_equal(
+                np.asarray(t1.location.to_value("m")).tolist(),
+                np.asarray(t2.location.to_value("m")).tolist(),
+            ):
+                return
+        except Exception:
+            return
     # The 50-ps tolerance was derived for ordinary astronomical epochs, not
     # arbitrarily large finite Julian dates.  Scale conversions contain rate
     # terms referenced to fixed epochs; at |JD|~1e9 their float64 rounding
@@ -347,6 +368,51 @@ _F_EXCLUDED_PROJECTIONS = frozenset({"CSC", "TSC", "QSC", "HPX", "NCP"})
 # violation of the pixel/world inverse contract at realistic precision.
 
 _F_MAX_PLANE_RADIANS = 100.0
+_G_MAX_CONTRACTION = 0.5
+
+
+def _wcs_world_at_pole(wcs_obj, world, pix=None, origin=0):
+    """True when the point sits within 1e-6 deg of a pole of the *native*
+    sphere. Mercator-like projections squash a ~20 rad plane offset into that
+    sliver, where float64 cannot recover the pixel (the native pole is an
+    arbitrary celestial point, so the celestial latitude is no guide)."""
+    import numpy as np
+
+    try:
+        if pix is None:
+            return False
+        native = wcs_obj.wcs.p2s(np.asarray(pix, dtype=float), origin)
+        theta = np.asarray(native["theta"], dtype=float)
+        return bool(np.nanmax(np.abs(theta)) > 90.0 - 1e-6)
+    except Exception:
+        return False
+
+
+def _wcs_sip_contraction(wcs_obj, pix, origin):
+    """Largest spectral norm of (I - d focal / d pixel) over the pixels: the
+    contraction factor of all_world2pix's fixed-point iteration. Its
+    documented stopping rule is on the *step*, so the remaining error is about
+    step / (1 - rho); the law 'error <= C * tolerance' needs rho well below 1."""
+    import numpy as np
+
+    if getattr(wcs_obj, "sip", None) is None:
+        return 0.0
+    try:
+        pix = np.atleast_2d(np.asarray(pix, dtype=float))
+        h = 1.0
+        rho = 0.0
+        jac = np.zeros((len(pix), 2, 2))
+        for j in range(2):
+            d = np.zeros(2)
+            d[j] = h
+            jac[:, :, j] = (
+                wcs_obj.sip_pix2foc(pix + d, origin) - wcs_obj.sip_pix2foc(pix - d, origin)
+            ) / (2 * h)
+        for jm in jac:
+            rho = max(rho, float(np.linalg.norm(np.eye(2) - jm, 2)))
+        return rho
+    except Exception:
+        return 0.0
 
 
 def _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=True):
@@ -447,8 +513,10 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     # vector norm, keeping the original absolute floor for ordinary
     # (near-reference-pixel) coordinates.
     pix_scale = float(np.max(np.abs(original_xy), initial=1.0))
-    if pix_scale > _F_MAX_ABS_PIXEL or _wcs_outside_projection_domain(
-        wcs_obj, original_xy, excluded_by_name=False
+    if (
+        pix_scale > _F_MAX_ABS_PIXEL
+        or _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=False)
+        or _wcs_world_at_pole(wcs_obj, world, original_xy, origin)
     ):
         return
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
@@ -495,6 +563,10 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     if float(
         np.max(np.abs(original_xy), initial=0.0)
     ) > _F_MAX_ABS_PIXEL or _wcs_outside_projection_domain(wcs_obj, original_xy):
+        return
+    if _wcs_world_at_pole(wcs_obj, world, original_xy, origin):
+        return
+    if _wcs_sip_contraction(wcs_obj, original_xy, origin) > _G_MAX_CONTRACTION:
         return
 
     default_tolerance = 1e-4
@@ -1346,6 +1418,14 @@ def check_biweight_midvariance_equivariance(
     u_abs = np.abs(arr - arr_median) / (float(c) * arr_mad)
     if np.any(np.abs(u_abs - 1.0) < 1e-9):
         return
+    # The estimator divides by [sum (1-u^2)(1-5u^2)]^2; when that sum nearly
+    # cancels (relative to sum of |terms|) the value is ill-conditioned by
+    # construction and no a*x+b comparison can be held to eps-level.
+    inside = u_abs < 1.0
+    terms = (1.0 - u_abs[inside] ** 2) * (1.0 - 5.0 * u_abs[inside] ** 2)
+    f2 = float(np.sum(terms))
+    if f2 == 0.0 or float(np.sum(np.abs(terms))) / abs(f2) > 1e4:
+        return
 
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
     a = float(rng.choice([-1.0, 1.0])) * float(rng.uniform(2.0, 1e4))
@@ -1684,7 +1764,12 @@ def check_convolution_flux_conservation(
     scale = max(1.0, float(np.max(np.abs(arr), initial=0.0)))
     tol = max(_T_TOL_FLOOR, _T_TOL_C * _EPS64 * math.sqrt(arr.size))
     tol *= kernel_cond
-    trigger_if(abs(after - before) > tol * scale, "AP-CONV-002")
+    # A normalized kernel sums to 1 +/- 1 ulp, and that same error repeats in
+    # every output pixel (e.g. a flat field), so the total-flux drift grows
+    # linearly in N, not as sqrt(N): add a systematic term relative to the
+    # total |flux| (1.5e-11 for a 256x256 field of ones is 1 ulp of 65536).
+    systematic = _T_TOL_C * _EPS64 * kernel_cond * float(np.sum(np.abs(arr)))
+    trigger_if(abs(after - before) > tol * scale + systematic, "AP-CONV-002")
 
 
 # --- Candidate U: convolve vs convolve_fft cross-implementation agreement --
