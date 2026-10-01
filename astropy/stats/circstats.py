@@ -398,7 +398,7 @@ def circcorrcoef(
     sin_a = np.sin(alpha - mu_a)
     sin_b = np.sin(beta - mu_b)
     if _tc.enabled():
-        _tc.circcorrcoef_denominator(np.sum(sin_a * sin_a), np.sum(sin_b * sin_b))
+        _tc.circcorrcoef_denominator(np.sum(sin_a * sin_a), np.sum(sin_b * sin_b), alpha, beta)
     rho = np.sum(sin_a * sin_b) / np.sqrt(np.sum(sin_a * sin_a) * np.sum(sin_b * sin_b))
 
     return rho

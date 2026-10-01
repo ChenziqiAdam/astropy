@@ -819,5 +819,5 @@ def biweight_midcorrelation(
     )
 
     if _tc.enabled():
-        _tc.biweight_midcorrelation_denominator(bicorr[0, 0], bicorr[1, 1])
+        _tc.biweight_midcorrelation_denominator(bicorr[0, 0], bicorr[1, 1], x, y)
     return bicorr[0, 1] / (np.sqrt(bicorr[0, 0] * bicorr[1, 1]))

@@ -516,7 +516,7 @@ class BoxLeastSquares(BasePeriodogram):
         def _compute_depth(m, y_out=None, var_out=None):
             if np.any(m) and (var_out is None or np.isfinite(var_out)):
                 if _tc.enabled():
-                    _tc.bls_depth_weight(ivar[m])
+                    _tc.bls_depth_weight(ivar[m], self.dy)
                 var_m = 1.0 / np.sum(ivar[m])
                 y_m = np.sum(y[m] * ivar[m]) * var_m
                 if y_out is None:

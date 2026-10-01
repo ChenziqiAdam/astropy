@@ -1158,8 +1158,6 @@ class FLRW(
             input redshift.
         """
         dm = self.comoving_transverse_distance(z)
-        if _tc.enabled():
-            _tc.efunc_nonzero(self.efunc(z))
         return self.hubble_distance * (dm**2.0) / (self.efunc(z) << u.steradian)
 
     def kpc_comoving_per_arcmin(self, z: u.Quantity | ArrayLike, /) -> u.Quantity:

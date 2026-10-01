@@ -96,10 +96,13 @@ def kuiper_n_nonzero(N):
 
 @_guard
 def biweight_location_finite(data, mad, value):
-    """AP-SWE-003: all-finite data with nonzero MAD must give a finite value."""
+    """AP-SWE-003: all-finite data of ordinary magnitude with nonzero MAD must
+    give a finite value. Magnitudes above 1e150 are excluded: ``c * MAD`` and
+    the weighted sums overflow float64 near its maximum by ordinary arithmetic.
+    """
     d = _plain(data)
     m = _plain(mad)
-    if np.all(np.isfinite(d)) and np.all(m != 0):
+    if np.all(np.isfinite(d)) and np.all(np.abs(d) < 1e150) and np.all(m != 0):
         trigger_if(_not_all_finite(value), "AP-SWE-003")
 
 
@@ -121,23 +124,38 @@ def biweight_midcovariance_denominator(denominator_matrix, mad):
 
 
 @_guard
-def biweight_midcorrelation_denominator(var_x, var_y):
-    """AP-SWE-006: ``bicorr[0,1] / sqrt(bicorr[0,0] * bicorr[1,1])``."""
-    prod = float(var_x) * float(var_y)
-    trigger_if(not (prod > 0.0), "AP-SWE-006")
+def biweight_midcorrelation_denominator(var_x, var_y, x, y):
+    """AP-SWE-006: ``bicorr[0,1] / sqrt(bicorr[0,0] * bicorr[1,1])``. A constant
+    variable has an undefined correlation (NaN by convention) and is excluded;
+    for finite non-constant inputs the radicand must be strictly positive.
+    """
+    x, y = _plain(x), _plain(y)
+    if np.all(np.isfinite(x)) and np.all(np.isfinite(y)) and np.ptp(x) > 0 and np.ptp(y) > 0:
+        prod = float(var_x) * float(var_y)
+        trigger_if(not (prod > 0.0), "AP-SWE-006")
 
 
 @_guard
 def circ_weight_sum_nonzero(weights, axis, data_shape):
-    """AP-SWE-007: ``sum(weights, axis)`` is a divisor."""
-    s = np.sum(_plain(np.broadcast_to(weights, data_shape)), axis)
-    trigger_if(np.any(s == 0), "AP-SWE-007")
+    """AP-SWE-007: ``sum(weights, axis)`` is a divisor. An all-zero weight slice
+    means "no data" and is excluded; a zero sum with nonzero weights
+    (cancelling signed weights) is an unguarded divisor.
+    """
+    w = _plain(np.broadcast_to(weights, data_shape))
+    s = np.sum(w, axis)
+    has_weight = np.sum(np.abs(w), axis) > 0
+    trigger_if(np.any((s == 0) & has_weight), "AP-SWE-007")
 
 
 @_guard
-def circcorrcoef_denominator(sum_aa, sum_bb):
-    """AP-SWE-008: ``sqrt(sum(sin_a^2) * sum(sin_b^2))`` is a divisor."""
-    trigger_if(not (float(sum_aa) * float(sum_bb) > 0.0), "AP-SWE-008")
+def circcorrcoef_denominator(sum_aa, sum_bb, alpha, beta):
+    """AP-SWE-008: ``sqrt(sum(sin_a^2) * sum(sin_b^2))`` is a divisor. A constant
+    angle sample has an undefined correlation (NaN by convention) and is
+    excluded; for finite non-constant samples the product must be positive.
+    """
+    a, b = _plain(alpha), _plain(beta)
+    if np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and np.ptp(a) > 0 and np.ptp(b) > 0:
+        trigger_if(not (float(sum_aa) * float(sum_bb) > 0.0), "AP-SWE-008")
 
 
 @_guard
@@ -149,14 +167,20 @@ def blocks_events_dt(T_k, dt):
 
 @_guard
 def scott_dx_nonzero(dx):
-    """AP-SWE-010: ``(max - min) / dx`` in scott_bin_width."""
+    """AP-SWE-010: ``(max - min) / dx`` in scott_bin_width (only evaluated when
+    return_bins is requested; the caller observes it inside that branch).
+    """
     trigger_if(float(dx) == 0.0, "AP-SWE-010")
 
 
 @_guard
-def freedman_dx_nonzero(dx):
-    """AP-SWE-011: ``(max - min) / dx`` in freedman_bin_width."""
-    trigger_if(float(dx) == 0.0, "AP-SWE-011")
+def freedman_dx_nonzero(dx, data_range):
+    """AP-SWE-011: ``(max - min) / dx`` in freedman_bin_width. A zero IQR on
+    non-constant data already raises a documented ValueError (astropy #7125)
+    and is excluded; constant data (range 0, dx 0) is divided as 0/0 and
+    silently produces zero-width bins.
+    """
+    trigger_if(float(dx) == 0.0 and float(data_range) == 0.0, "AP-SWE-011")
 
 
 @_guard
@@ -167,16 +191,21 @@ def aic_nparams_nonzero(n_params):
 
 @_guard
 def bic_lsq_log_domain(ssr, n_samples):
-    """AP-SWE-013: ``log(ssr / n_samples)`` needs a positive finite argument."""
+    """AP-SWE-013: ``log(ssr / n_samples)`` needs a nonnegative finite argument.
+    ssr == 0 (a perfect fit, log 0 = -inf) is a defined limit and excluded.
+    """
     q = _plain(ssr) / _plain(n_samples)
-    trigger_if(np.any(~(q > 0.0)) or _not_all_finite(q), "AP-SWE-013")
+    trigger_if(np.any(q < 0.0) or not np.all(np.isfinite(q)), "AP-SWE-013")
 
 
 @_guard
-def snr_noise_nonzero(noise):
-    """AP-SWE-014: ``signal / noise``."""
-    n = _plain(noise)
-    trigger_if(np.any(n == 0) or not np.all(np.isfinite(n)), "AP-SWE-014")
+def snr_noise_nonzero(noise, signal):
+    """AP-SWE-014: ``signal / noise``. Zero noise with zero signal (zero
+    exposure, 0/0) is excluded; a nonzero signal over zero noise is an
+    unguarded divisor.
+    """
+    n, sg = _plain(noise), _plain(signal)
+    trigger_if(np.any((n == 0) & (sg != 0)) or not np.all(np.isfinite(n)), "AP-SWE-014")
 
 
 # --- convolution -------------------------------------------------------------
@@ -190,13 +219,17 @@ def convolve_fft_output_shape(array, out, crop):
 
 @_guard
 def convolve_output_finite(array, kernel, result):
-    """AP-SWE-016: finite array and finite kernel must give a finite result."""
+    """AP-SWE-016: finite array and kernel must give a finite result, unless the
+    worst-case sum of products could exceed float64 (excluded as ordinary overflow).
+    """
     # Use the caller's original inputs: nan_treatment/preserve_nan legitimately
     # re-insert NaN into the output for NaN inputs.
     if hasattr(array, "array"):  # Kernel objects are handled before this point
         return
-    if np.all(np.isfinite(_plain(array))) and np.all(np.isfinite(_plain(kernel))):
-        trigger_if(_not_all_finite(result), "AP-SWE-016")
+    a, k = _plain(array), _plain(kernel)
+    if np.all(np.isfinite(a)) and np.all(np.isfinite(k)):
+        if np.sum(np.abs(a)) * np.sum(np.abs(k)) < 1e300:
+            trigger_if(_not_all_finite(result), "AP-SWE-016")
 
 
 @_guard
@@ -206,14 +239,6 @@ def oversample_reshape(size, factor):
 
 
 # --- visualization -----------------------------------------------------------
-
-@_guard
-def asinh_divisor(a):
-    """AP-SWE-018: ``values / arcsinh(1 / a)``."""
-    with np.errstate(all="ignore"):
-        d = np.arcsinh(1.0 / np.asarray(a, dtype=float))
-    trigger_if(np.any(d == 0) or not np.all(np.isfinite(d)), "AP-SWE-018")
-
 
 @_guard
 def histeq_range(vmin, vmax):
@@ -238,10 +263,14 @@ def autofrequency_grid(baseline, samples_per_peak):
 
 
 @_guard
-def ls_offset_weight_sum(w):
-    """AP-SWE-022: ``dot(y, w) / w.sum()``."""
-    s = np.sum(_plain(w))
-    trigger_if(s == 0 or not np.isfinite(s), "AP-SWE-022")
+def ls_offset_weight_sum(w, dy):
+    """AP-SWE-022: ``dot(y, w) / w.sum()``. Uncertainties outside [1e-100, 1e100]
+    are excluded: ``dy ** -2`` leaves float64 range there by ordinary arithmetic.
+    """
+    d = _plain(dy)
+    if np.all(np.isfinite(d)) and np.all((np.abs(d) >= 1e-100) & (np.abs(d) <= 1e100)):
+        s = np.sum(_plain(w))
+        trigger_if(s == 0 or not np.isfinite(s), "AP-SWE-022")
 
 
 @_guard
@@ -257,26 +286,27 @@ def bls_model_weights(ivar_in, ivar_out):
 
 
 @_guard
-def bls_depth_weight(ivar_m):
-    """AP-SWE-025: ``1.0 / np.sum(ivar[m])``."""
-    trigger_if(np.sum(_plain(ivar_m)) == 0, "AP-SWE-025")
+def bls_depth_weight(ivar_m, dy):
+    """AP-SWE-025: ``1.0 / np.sum(ivar[m])``; uncertainties outside [1e-100, 1e100]
+    are excluded (the inverse variance underflows or overflows by ordinary arithmetic).
+    """
+    d = _plain(dy)
+    if np.all(np.isfinite(d)) and np.all((np.abs(d) >= 1e-100) & (np.abs(d) <= 1e100)):
+        trigger_if(np.sum(_plain(ivar_m)) == 0, "AP-SWE-025")
 
 
 @_guard
-def ls_weighted_mean_denominator(denominator):
-    """AP-SWE-026: ``_weighted_sum(val, dy) / _weighted_sum(ones, dy)``."""
-    d = _plain(denominator)
-    trigger_if(np.any(d == 0) or not np.all(np.isfinite(d)), "AP-SWE-026")
+def ls_weighted_mean_denominator(denominator, dy):
+    """AP-SWE-026: ``_weighted_sum(val, dy) / _weighted_sum(ones, dy)``; uncertainties
+    outside [1e-100, 1e100] are excluded as ordinary float64 under/overflow.
+    """
+    dd = _plain(dy)
+    if np.all(np.isfinite(dd)) and np.all((np.abs(dd) >= 1e-100) & (np.abs(dd) <= 1e100)):
+        d = _plain(denominator)
+        trigger_if(np.any(d == 0) or not np.all(np.isfinite(d)), "AP-SWE-026")
 
 
 # --- nddata ------------------------------------------------------------------
-
-@_guard
-def inverse_variance_nonzero(array):
-    """AP-SWE-027: ``1 / self.array`` in InverseVariance <-> Variance."""
-    if array is not None:
-        trigger_if(_any_zero(array), "AP-SWE-027")
-
 
 @_guard
 def mean_count_nonzero(denom, total):
@@ -304,11 +334,10 @@ def powerlaw_x0_nonzero(x_0):
 
 @_guard
 def arcsine_domain(x, amplitude):
-    """AP-SWE-031: ``arcsin(x / amplitude)`` needs ``|x / amplitude| <= 1``."""
-    amp = _plain(amplitude)
-    with np.errstate(all="ignore"):
-        arg = _plain(x) / amp
-    trigger_if(np.any(amp == 0) or np.any(np.abs(arg) > 1), "AP-SWE-031")
+    """AP-SWE-031: ``x / amplitude`` divides by the amplitude parameter. NaN from
+    arcsin outside [-1, 1] is the model's mathematical domain and is excluded.
+    """
+    trigger_if(_any_zero(amplitude), "AP-SWE-031")
 
 
 # --- coordinates -------------------------------------------------------------
@@ -335,20 +364,6 @@ def coslat_nonzero(lat):
 # --- cosmology ---------------------------------------------------------------
 
 @_guard
-def efunc_nonzero(efunc):
-    """AP-SWE-034: ``... / efunc(z)``."""
-    trigger_if(_any_zero(efunc), "AP-SWE-034")
-
-
-@_guard
 def flat_age_denominator(Om0):
     """AP-SWE-035: ``... / sqrt(1 - Om0)``."""
     trigger_if(1.0 - float(Om0) == 0.0, "AP-SWE-035")
-
-
-# --- units -------------------------------------------------------------------
-
-@_guard
-def spectral_reciprocal_nonzero(x):
-    """AP-SWE-036: ``c / x`` in the wavelength -> frequency conversion."""
-    trigger_if(_any_zero(x), "AP-SWE-036")

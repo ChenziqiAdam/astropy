@@ -26,7 +26,7 @@ def _weighted_mean(val, dy):
         return val.mean()
     else:
         if _tc.enabled():
-            _tc.ls_weighted_mean_denominator(_weighted_sum(np.ones(val.shape), dy))
+            _tc.ls_weighted_mean_denominator(_weighted_sum(np.ones(val.shape), dy), dy)
         return _weighted_sum(val, dy) / _weighted_sum(np.ones(val.shape), dy)
 
 

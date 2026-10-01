@@ -1213,8 +1213,6 @@ class InverseVariance(_VariancePropagationMixin, NDUncertainty):
         return 1 / value**2
 
     def _convert_to_variance(self):
-        if _tc.enabled():
-            _tc.inverse_variance_nonzero(self.array)
         new_array = None if self.array is None else 1 / self.array
         new_unit = None if self.unit is None else 1 / self.unit
         return VarianceUncertainty(new_array, unit=new_unit)

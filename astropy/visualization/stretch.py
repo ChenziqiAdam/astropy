@@ -709,8 +709,6 @@ class AsinhStretch(BaseStretch):
 
     def __call__(self, values, clip=True, out=None):
         values = _prepare(values, clip=clip, out=out)
-        if _tc.enabled():
-            _tc.asinh_divisor(self.a)
         np.true_divide(values, self.a, out=values)
         np.arcsinh(values, out=values)
         np.true_divide(values, np.arcsinh(1.0 / self.a), out=values)

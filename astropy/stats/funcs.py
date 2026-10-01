@@ -992,7 +992,7 @@ def signal_to_noise_oir_ccd(
         t * (source_eps * gain + npix * (sky_eps * gain + dark_eps)) + npix * rd**2
     )
     if _tc.enabled():
-        _tc.snr_noise_nonzero(noise)
+        _tc.snr_noise_nonzero(noise, signal)
     return signal / noise
 
 

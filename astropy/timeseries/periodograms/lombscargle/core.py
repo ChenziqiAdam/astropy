@@ -486,7 +486,7 @@ class LombScargle(BasePeriodogram):
         if self.center_data:
             w = dy**-2.0
             if _tc.enabled():
-                _tc.ls_offset_weight_sum(w)
+                _tc.ls_offset_weight_sum(w, dy)
             y_mean = np.dot(y, w) / w.sum()
         else:
             y_mean = 0
