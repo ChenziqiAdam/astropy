@@ -1,5 +1,6 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy.modeling.core import Model, custom_model
 
@@ -286,6 +287,8 @@ def discretize_oversample_1D(model, x_range, factor=10):
     values = model(x)
 
     # Reshape and compute mean
+    if _tc.enabled():
+        _tc.oversample_reshape(x.size, factor)
     values = np.reshape(values, (x.size // factor, factor))
     return values.mean(axis=1)
 

@@ -4,6 +4,7 @@ import warnings
 from functools import partial
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy import units as u
 from astropy.modeling.convolution import Convolution
@@ -463,6 +464,8 @@ def convolve(
         if isinstance(passed_kernel, Kernel):
             new_result._separable = new_result._separable and passed_kernel._separable
         return new_result
+    if _tc.enabled():
+        _tc.convolve_output_finite(passed_array, passed_kernel, result)
     if array_dtype.kind == "f":
         # Try to preserve the input type if it's a floating point type
         return result.astype(array_dtype, copy=False)
@@ -977,6 +980,8 @@ def convolve_fft(
     if preserve_nan:
         rifft[arrayslices][nanmaskarray] = np.nan
 
+    if _tc.enabled():
+        _tc.convolve_fft_output_shape(array, rifft[arrayslices] if crop else rifft, crop)
     return rifft[arrayslices].real if crop else rifft.real
 
 

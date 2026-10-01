@@ -4,6 +4,7 @@
 import operator
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from erfa import ufunc as erfa_ufunc
 
 import astropy.units as u
@@ -897,6 +898,8 @@ class BaseSphericalDifferential(BaseDifferential):
             The base from which the latitude will be taken.
         """
         cls._check_base(base)
+        if _tc.enabled():
+            _tc.coslat_nonzero(base.lat)
         return d_lon_coslat / np.cos(base.lat)
 
     def _combine_operation(self, op, other, reverse=False):
@@ -1142,6 +1145,8 @@ class BaseSphericalCosLatDifferential(BaseDifferential):
             The base from which the latitude will be taken.
         """
         self._check_base(base)
+        if _tc.enabled():
+            _tc.coslat_nonzero(base.lat)
         return self.d_lon_coslat / np.cos(base.lat)
 
     @classmethod

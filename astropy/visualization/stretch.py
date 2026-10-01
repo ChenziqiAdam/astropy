@@ -6,6 +6,7 @@ another set of [0:1] values with a transformation.
 """
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from .transform import BaseTransform, CompositeTransform
 
@@ -708,6 +709,8 @@ class AsinhStretch(BaseStretch):
 
     def __call__(self, values, clip=True, out=None):
         values = _prepare(values, clip=clip, out=out)
+        if _tc.enabled():
+            _tc.asinh_divisor(self.a)
         np.true_divide(values, self.a, out=values)
         np.arcsinh(values, out=values)
         np.true_divide(values, np.arcsinh(1.0 / self.a), out=values)
@@ -806,6 +809,8 @@ class HistEqStretch(BaseStretch):
         self.data = self.data[np.isfinite(self.data)]
         vmin = self.data.min()
         vmax = self.data.max()
+        if _tc.enabled():
+            _tc.histeq_range(vmin, vmax)
         self.data = (self.data - vmin) / (vmax - vmin)
 
         # Compute relative position of each pixel

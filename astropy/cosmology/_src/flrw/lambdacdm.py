@@ -6,6 +6,7 @@ from math import acos, cos, inf, sin, sqrt
 from numbers import Number
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy import log
 from numpy.typing import ArrayLike, NDArray
 
@@ -458,6 +459,8 @@ class LambdaCDM(FLRW):
         """
         # Use np.sqrt, np.arcsinh instead of math.sqrt, math.asinh
         # to handle properly the complex numbers for 1 - Om0 < 0
+        if _tc.enabled():
+            _tc.flat_age_denominator(self.Om0)
         prefactor = (2.0 / 3) * self.hubble_time / np.emath.sqrt(1 - self.Om0)
         arg = np.arcsinh(
             np.emath.sqrt((1 / self.Om0 - 1 + 0j) / (aszarr(z) + 1.0) ** 3)

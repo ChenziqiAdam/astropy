@@ -12,6 +12,7 @@ from typing import Final
 
 # THIRD-PARTY
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 # LOCAL
 from astropy.constants import si as _si
@@ -156,9 +157,14 @@ def spectral():
     inv_m_spec = si.m**-1
     inv_m_ang = si.radian / si.m
 
+    def _wav_to_freq(x):
+        if _tc.enabled():
+            _tc.spectral_reciprocal_nonzero(x)
+        return c / x
+
     return Equivalency(
         [
-            (si.m, si.Hz, lambda x: c / x),
+            (si.m, si.Hz, _wav_to_freq),
             (si.m, si.J, lambda x: hc / x),
             (si.Hz, si.J, lambda x: h * x, lambda x: x / h),
             (si.m, inv_m_spec, lambda x: 1.0 / x),

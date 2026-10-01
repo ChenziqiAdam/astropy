@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Literal, overload
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import NDArray
 
 from astropy import units as u
@@ -671,6 +672,8 @@ class Cutout2D:
                         pixel_scales = u.Quantity(
                             proj_plane_pixel_scales(wcs), wcs.wcs.cunit[axis]
                         )
+                    if _tc.enabled():
+                        _tc.pixel_scale_nonzero(pixel_scales[axis])
                     shape[axis] = int(np.round((side / pixel_scales[axis]).decompose()))
                 else:
                     raise ValueError(

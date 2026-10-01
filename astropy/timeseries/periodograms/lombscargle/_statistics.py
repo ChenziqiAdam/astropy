@@ -9,6 +9,7 @@ This is an internal module; users should access this functionality via the
 from functools import wraps
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy import units as u
 
@@ -24,6 +25,8 @@ def _weighted_mean(val, dy):
     if dy is None:
         return val.mean()
     else:
+        if _tc.enabled():
+            _tc.ls_weighted_mean_denominator(_weighted_sum(np.ones(val.shape), dy))
         return _weighted_sum(val, dy) / _weighted_sum(np.ones(val.shape), dy)
 
 
@@ -367,6 +370,8 @@ def fap_bootstrap(
     """Bootstrap estimate of the false alarm probability."""
     pmax = _bootstrap_max(t, y, dy, fmax, normalization, random_seed, n_bootstraps)
 
+    if _tc.enabled():
+        _tc.fap_bootstrap_len(pmax)
     return 1 - np.searchsorted(pmax, Z) / len(pmax)
 
 

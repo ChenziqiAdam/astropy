@@ -8,6 +8,7 @@ various criteria.
 import abc
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy.utils.masked import get_data_and_mask
 
@@ -322,6 +323,8 @@ class ZScaleInterval(BaseInterval):
         values = self._process_values(values)
 
         # Sample the image
+        if _tc.enabled():
+            _tc.zscale_nsamples(self.n_samples)
         stride = int(max(1.0, values.size / self.n_samples))
         samples = values[::stride][: self.n_samples]
         samples.sort()

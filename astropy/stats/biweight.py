@@ -7,6 +7,7 @@ Tukey's biweight function.
 from collections.abc import Callable
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import ArrayLike, NDArray
 
 from astropy.stats.funcs import median_absolute_deviation
@@ -185,6 +186,8 @@ def biweight_location(
         value = M.squeeze(axis=axis) + (
             sum_func(d * u, axis=axis) / sum_func(u, axis=axis)
         )
+        if _tc.enabled():
+            _tc.biweight_location_finite(data, mad, value)
         if np.isscalar(value):
             return value
 
@@ -494,6 +497,8 @@ def biweight_midvariance(
     # 0.0 along that axis.
     # Ignore RuntimeWarnings for divide by zero.
     with np.errstate(divide="ignore", invalid="ignore"):
+        if _tc.enabled():
+            _tc.biweight_midvariance_denominator(f2, mad.squeeze(axis=axis) if axis is not None else mad)
         value = n * f1 / f2
         if np.isscalar(value):
             return value
@@ -713,6 +718,8 @@ def biweight_midcovariance(
         numerator_matrix = np.dot(numerator, numerator.T)
         denominator_matrix = np.dot(denominator, denominator.T)
 
+        if _tc.enabled():
+            _tc.biweight_midcovariance_denominator(denominator_matrix, mad)
         value = n * (numerator_matrix / denominator_matrix)
         idx = np.where(mad == 0)[0]
         value[idx, :] = 0
@@ -811,4 +818,6 @@ def biweight_midcorrelation(
         [x, y], c=c, M=M, modify_sample_size=modify_sample_size
     )
 
+    if _tc.enabled():
+        _tc.biweight_midcorrelation_denominator(bicorr[0, 0], bicorr[1, 1])
     return bicorr[0, 1] / (np.sqrt(bicorr[0, 0] * bicorr[1, 1]))

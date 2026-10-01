@@ -5,6 +5,7 @@ Power law model variants.
 
 # pylint: disable=invalid-name
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy.units import Magnitude, Quantity, UnitsError, dimensionless_unscaled, mag
 
@@ -53,6 +54,8 @@ class PowerLaw1D(Fittable1DModel):
     @staticmethod
     def evaluate(x, amplitude, x_0, alpha):
         """One dimensional power law model function."""
+        if _tc.enabled():
+            _tc.powerlaw_x0_nonzero(x_0)
         xx = x / x_0
         return amplitude * xx ** (-alpha)
 

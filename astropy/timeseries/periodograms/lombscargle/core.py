@@ -1,6 +1,7 @@
 """Main Lomb-Scargle Implementation."""
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy import units
 from astropy import units as u
@@ -240,6 +241,8 @@ class LombScargle(BasePeriodogram):
         baseline = self._trel.max() - self._trel.min()
         n_samples = self._trel.size
 
+        if _tc.enabled():
+            _tc.autofrequency_grid(baseline, samples_per_peak)
         df = 1.0 / baseline / samples_per_peak
 
         if minimum_frequency is None:
@@ -482,6 +485,8 @@ class LombScargle(BasePeriodogram):
         dy = np.broadcast_to(dy, y.shape)
         if self.center_data:
             w = dy**-2.0
+            if _tc.enabled():
+                _tc.ls_offset_weight_sum(w)
             y_mean = np.dot(y, w) / w.sum()
         else:
             y_mean = 0

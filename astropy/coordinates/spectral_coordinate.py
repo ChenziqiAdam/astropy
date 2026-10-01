@@ -2,6 +2,7 @@ import warnings
 from textwrap import indent
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 import astropy.units as u
 from astropy.constants import c
@@ -54,6 +55,8 @@ def _apply_relativistic_doppler_shift(scoord, velocity):
     squantity = scoord.view(SpectralQuantity)
 
     beta = (velocity / c).to_value(u.dimensionless_unscaled)
+    if _tc.enabled():
+        _tc.doppler_factor_domain(beta)
     doppler_factor = np.sqrt((1.0 + beta) / (1.0 - beta))
 
     match squantity.unit.physical_type:

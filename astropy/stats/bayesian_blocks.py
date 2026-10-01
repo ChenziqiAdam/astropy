@@ -51,6 +51,7 @@ from inspect import signature
 from typing import Literal
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import ArrayLike, NDArray
 
 from astropy.utils.exceptions import AstropyUserWarning
@@ -421,6 +422,8 @@ class RegularEvents(FitnessFunc):
     def fitness(self, T_k: NDArray[float], N_k: NDArray[float]) -> NDArray[float]:
         # Eq. C23 of Scargle 2013
         M_k = T_k / self.dt
+        if _tc.enabled():
+            _tc.blocks_events_dt(T_k, self.dt)
         N_over_M = N_k / M_k
 
         eps = 1e-8

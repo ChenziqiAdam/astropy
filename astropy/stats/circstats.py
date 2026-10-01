@@ -11,6 +11,7 @@ are based on reference [1]_, which is also the basis for the R package
 """
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import NDArray
 
 from astropy.units import Quantity
@@ -44,6 +45,8 @@ def _components(
     except ValueError:
         raise ValueError("Weights and data have inconsistent shape.")
 
+    if _tc.enabled():
+        _tc.circ_weight_sum_nonzero(weights, axis, data.shape)
     C = np.sum(weights * np.cos(p * (data - phi)), axis) / np.sum(weights, axis)
     S = np.sum(weights * np.sin(p * (data - phi)), axis) / np.sum(weights, axis)
 
@@ -394,6 +397,8 @@ def circcorrcoef(
 
     sin_a = np.sin(alpha - mu_a)
     sin_b = np.sin(beta - mu_b)
+    if _tc.enabled():
+        _tc.circcorrcoef_denominator(np.sum(sin_a * sin_a), np.sum(sin_b * sin_b))
     rho = np.sum(sin_a * sin_b) / np.sqrt(np.sum(sin_a * sin_a) * np.sum(sin_b * sin_b))
 
     return rho

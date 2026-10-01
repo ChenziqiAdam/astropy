@@ -11,6 +11,7 @@ from math import floor, pi, sqrt
 from typing import Any, Final, NamedTuple, TypeVar, overload
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy import inf, sin
 from numpy.typing import ArrayLike, NDArray
 
@@ -1157,6 +1158,8 @@ class FLRW(
             input redshift.
         """
         dm = self.comoving_transverse_distance(z)
+        if _tc.enabled():
+            _tc.efunc_nonzero(self.efunc(z))
         return self.hubble_distance * (dm**2.0) / (self.efunc(z) << u.steradian)
 
     def kpc_comoving_per_arcmin(self, z: u.Quantity | ArrayLike, /) -> u.Quantity:

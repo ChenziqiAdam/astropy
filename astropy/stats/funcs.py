@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Literal, SupportsFloat, TypeVar
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import ArrayLike, NDArray
 
 from astropy.utils.compat.optional_deps import HAS_BOTTLENECK, HAS_MPMATH, HAS_SCIPY
@@ -293,6 +294,8 @@ def binom_conf_interval(
     else:
         raise ValueError(f"Unrecognized interval: {interval:s}")
 
+    if _tc.enabled():
+        _tc.binom_interval_finite(conf_interval)
     return conf_interval
 
 
@@ -988,6 +991,8 @@ def signal_to_noise_oir_ccd(
     noise = np.sqrt(
         t * (source_eps * gain + npix * (sky_eps * gain + dark_eps)) + npix * rd**2
     )
+    if _tc.enabled():
+        _tc.snr_noise_nonzero(noise)
     return signal / noise
 
 
@@ -1369,6 +1374,8 @@ def kuiper_false_positive_probability(D: float, N: float) -> float:
     if D < 0.0 or D > 2.0:
         raise ValueError("Must have 0<=D<=2 by definition of the Kuiper test")
 
+    if _tc.enabled():
+        _tc.kuiper_n_nonzero(N)
     if D < 2.0 / N:
         return 1.0 - factorial(N) * (D - 1.0 / N) ** (N - 1)
     elif D < 3.0 / N:

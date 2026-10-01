@@ -6,6 +6,7 @@
 import warnings
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy import units as u
 from astropy.units import Quantity, UnitsError
@@ -1268,6 +1269,8 @@ class ArcSine1D(_InverseTrigonometric1D):
         # quantity-ness from argument in this case (another option would be to
         # multiply by * u.rad but this would be slower overall).
 
+        if _tc.enabled():
+            _tc.arcsine_domain(x, amplitude)
         argument = x / amplitude
         if isinstance(argument, Quantity):
             argument = argument.value

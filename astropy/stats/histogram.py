@@ -9,6 +9,7 @@ Ported from the astroML project: https://www.astroml.org/
 from typing import Literal
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 from numpy.typing import ArrayLike, NDArray
 
 from .bayesian_blocks import bayesian_blocks
@@ -227,6 +228,8 @@ def scott_bin_width(
 
     dx = 3.5 * sigma / (n ** (1 / 3))
 
+    if _tc.enabled():
+        _tc.scott_dx_nonzero(dx)
     if return_bins:
         Nbins = np.ceil((data.max() - data.min()) / dx)
         Nbins = max(1, Nbins)
@@ -294,6 +297,8 @@ def freedman_bin_width(
     v25, v75 = np.percentile(data, [25, 75])
     dx = 2 * (v75 - v25) / (n ** (1 / 3))
 
+    if _tc.enabled():
+        _tc.freedman_dx_nonzero(dx)
     if return_bins:
         dmin, dmax = data.min(), data.max()
         Nbins = max(1, np.ceil((dmax - dmin) / dx))

@@ -5,6 +5,7 @@ This module contains simple functions for model selection.
 """
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 __all__ = [
     "akaike_info_criterion",
@@ -208,6 +209,8 @@ def bayesian_info_criterion_lsq(
     .. [3] Astropy Models and Fitting
         <https://docs.astropy.org/en/stable/modeling>
     """
+    if _tc.enabled():
+        _tc.bic_lsq_log_domain(ssr, n_samples)
     return bayesian_info_criterion(
         -0.5 * n_samples * np.log(ssr / n_samples), n_params, n_samples
     )
@@ -313,6 +316,8 @@ def akaike_info_criterion(
        <https://arxiv.org/pdf/astro-ph/0401198v3.pdf>
     """
     # Correction in case of small number of observations
+    if _tc.enabled():
+        _tc.aic_nparams_nonzero(n_params)
     if n_samples / float(n_params) >= 40.0:
         aic = 2.0 * (n_params - log_likelihood)
     else:

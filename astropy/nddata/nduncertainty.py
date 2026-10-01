@@ -5,6 +5,7 @@ from abc import ABCMeta, abstractmethod
 from copy import deepcopy
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 # from astropy.utils.compat import ignored
 from astropy import log
@@ -61,6 +62,8 @@ def from_variance_for_mean(x, axis):
         denom = np.ma.count(x)
     else:
         denom = np.ma.count(x, axis)
+    if _tc.enabled():
+        _tc.mean_count_nonzero(denom, np.ma.sum(x, axis))
     return np.sqrt(np.ma.sum(x, axis)) / denom
 
 
@@ -1210,6 +1213,8 @@ class InverseVariance(_VariancePropagationMixin, NDUncertainty):
         return 1 / value**2
 
     def _convert_to_variance(self):
+        if _tc.enabled():
+            _tc.inverse_variance_nonzero(self.array)
         new_array = None if self.array is None else 1 / self.array
         new_unit = None if self.unit is None else 1 / self.unit
         return VarianceUncertainty(new_array, unit=new_unit)

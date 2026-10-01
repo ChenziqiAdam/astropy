@@ -3,6 +3,7 @@
 __all__ = ["BoxLeastSquares", "BoxLeastSquaresResults"]
 
 import numpy as np
+from astropy import _traditional_checkers as _tc
 
 from astropy import units
 from astropy import units as u
@@ -437,6 +438,8 @@ class BoxLeastSquares(BasePeriodogram):
         hp = 0.5 * period
         m_in = np.abs((t - transit_time + hp) % period - hp) < 0.5 * duration
         m_out = ~m_in
+        if _tc.enabled():
+            _tc.bls_model_weights(ivar[m_in], ivar[m_out])
         y_in = np.sum(y[m_in] * ivar[m_in]) / np.sum(ivar[m_in])
         y_out = np.sum(y[m_out] * ivar[m_out]) / np.sum(ivar[m_out])
 
@@ -512,6 +515,8 @@ class BoxLeastSquares(BasePeriodogram):
         # different hypothesized transit models with different parameters
         def _compute_depth(m, y_out=None, var_out=None):
             if np.any(m) and (var_out is None or np.isfinite(var_out)):
+                if _tc.enabled():
+                    _tc.bls_depth_weight(ivar[m])
                 var_m = 1.0 / np.sum(ivar[m])
                 y_m = np.sum(y[m] * ivar[m]) * var_m
                 if y_out is None:
