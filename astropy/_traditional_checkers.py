@@ -152,9 +152,18 @@ def circcorrcoef_denominator(sum_aa, sum_bb, alpha, beta):
     """AP-SWE-008: ``sqrt(sum(sin_a^2) * sum(sin_b^2))`` is a divisor. A constant
     angle sample has an undefined correlation (NaN by convention) and is
     excluded; for finite non-constant samples the product must be positive.
+    Spreads so small that the product of the two sums of squares underflows
+    float64 (about ptp_a * ptp_b < 1e-145) are a floating-point limit, not a
+    missing guard, and are excluded.
     """
     a, b = _plain(alpha), _plain(beta)
-    if np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and np.ptp(a) > 0 and np.ptp(b) > 0:
+    if (
+        np.all(np.isfinite(a))
+        and np.all(np.isfinite(b))
+        and np.ptp(a) > 0
+        and np.ptp(b) > 0
+        and float(np.ptp(a)) * float(np.ptp(b)) > 1e-100
+    ):
         trigger_if(not (float(sum_aa) * float(sum_bb) > 0.0), "AP-SWE-008")
 
 
@@ -192,20 +201,25 @@ def aic_nparams_nonzero(n_params):
 @_guard
 def bic_lsq_log_domain(ssr, n_samples):
     """AP-SWE-013: ``log(ssr / n_samples)`` needs a nonnegative finite argument.
-    ssr == 0 (a perfect fit, log 0 = -inf) is a defined limit and excluded.
+    ssr == 0 (a perfect fit, log 0 = -inf) is a defined limit and excluded,
+    as is a non-finite ssr (residuals large enough to overflow when squared
+    are a floating-point limit).
     """
-    q = _plain(ssr) / _plain(n_samples)
-    trigger_if(np.any(q < 0.0) or not np.all(np.isfinite(q)), "AP-SWE-013")
+    s = _plain(ssr)
+    q = s / _plain(n_samples)
+    finite_ssr = np.all(np.isfinite(s))
+    trigger_if(np.any(q < 0.0) or (finite_ssr and not np.all(np.isfinite(q))), "AP-SWE-013")
 
 
 @_guard
 def snr_noise_nonzero(noise, signal):
     """AP-SWE-014: ``signal / noise``. Zero noise with zero signal (zero
     exposure, 0/0) is excluded; a nonzero signal over zero noise is an
-    unguarded divisor.
+    unguarded divisor. An infinite noise is a floating-point limit (squared
+    read noise or counts overflowing) and is excluded; NaN noise is not.
     """
     n, sg = _plain(noise), _plain(signal)
-    trigger_if(np.any((n == 0) & (sg != 0)) or not np.all(np.isfinite(n)), "AP-SWE-014")
+    trigger_if(np.any((n == 0) & (sg != 0)) or np.any(np.isnan(n)), "AP-SWE-014")
 
 
 # --- convolution -------------------------------------------------------------
@@ -218,10 +232,16 @@ def convolve_fft_output_shape(array, out, crop):
 
 
 @_guard
-def convolve_output_finite(array, kernel, result):
+def convolve_output_finite(array, kernel, result, mask=None):
     """AP-SWE-016: finite array and kernel must give a finite result, unless the
     worst-case sum of products could exceed float64 (excluded as ordinary overflow).
+    Masked input is excluded: masked pixels are turned into NaN, and a window
+    that contains only masked pixels gives NaN by documented design.
     """
+    if mask is not None and np.any(np.asarray(mask) != 0):
+        return
+    if np.ma.is_masked(array):
+        return
     # Use the caller's original inputs: nan_treatment/preserve_nan legitimately
     # re-insert NaN into the output for NaN inputs.
     if hasattr(array, "array"):  # Kernel objects are handled before this point

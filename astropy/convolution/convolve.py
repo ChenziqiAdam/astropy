@@ -465,7 +465,7 @@ def convolve(
             new_result._separable = new_result._separable and passed_kernel._separable
         return new_result
     if _tc.enabled():
-        _tc.convolve_output_finite(passed_array, passed_kernel, result)
+        _tc.convolve_output_finite(passed_array, passed_kernel, result, mask)
     if array_dtype.kind == "f":
         # Try to preserve the input type if it's a floating point type
         return result.astype(array_dtype, copy=False)
