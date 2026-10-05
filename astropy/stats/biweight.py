@@ -190,7 +190,7 @@ def biweight_location(
             if _scientific_checkers.enabled():
                 try:
                     _scientific_checkers.check_biweight_location_equivariance(
-                        data, c, axis, ignore_nan, value
+                        data, c, axis, ignore_nan, value, M
                     )
                 except Exception:
                     pass
@@ -507,7 +507,7 @@ def biweight_midvariance(
             if _scientific_checkers.enabled():
                 try:
                     _scientific_checkers.check_biweight_midvariance_equivariance(
-                        data, c, axis, modify_sample_size, ignore_nan, value
+                        data, c, axis, modify_sample_size, ignore_nan, value, M
                     )
                 except Exception:
                     pass

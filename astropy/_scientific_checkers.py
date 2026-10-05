@@ -354,6 +354,28 @@ def check_time_arithmetic_inverse(t1, t2, delta):
 # rounding is less predictable a priori than pure-Python chains.
 
 _F_TOL_PX = 1e-6
+
+# wcslib inverts iterative projections (e.g. AIR) to a fixed *angular*
+# precision (prj.h documents closure "to a precision of at least 1E-10
+# degree"; a 2000-point AIR sweep at plate scales 1e-9..1e-2 deg/px peaked at
+# 1.14e-10 deg). A pixel-unit threshold alone demands more than that once the
+# plate scale is small, so the round-trip tolerance never goes below this
+# angular floor converted to pixels.
+_WCS_ANGULAR_FLOOR_DEG = 3e-10
+
+
+def _wcs_angular_floor_px(wcs_obj):
+    """``_WCS_ANGULAR_FLOOR_DEG`` expressed in pixels (0.0 if the plate scale
+    cannot be determined)."""
+    try:
+        from astropy.wcs.utils import proj_plane_pixel_scales
+
+        scale = float(min(proj_plane_pixel_scales(wcs_obj.celestial)))
+    except Exception:
+        return 0.0
+    if not (scale > 0.0) or scale != scale:
+        return 0.0
+    return _WCS_ANGULAR_FLOOR_DEG / scale
 # Pixel offsets this large correspond to world offsets of many full turns for any
 # realistic plate scale; the projection inverse is not single-valued there.
 _F_MAX_ABS_PIXEL = 1e6
@@ -520,7 +542,8 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     ):
         return
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
-    trigger_if(err > _F_TOL_PX * max(1.0, pix_scale), "AP-WCS-001")
+    tol_px = max(_F_TOL_PX * max(1.0, pix_scale), _wcs_angular_floor_px(wcs_obj))
+    trigger_if(err > tol_px, "AP-WCS-001")
 
 
 # --- Candidate G: all_world2pix's documented convergence contract ---------
@@ -581,7 +604,8 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     err = float(np.max(np.linalg.norm(
         np.asarray(recon_xy) - np.asarray(original_xy), axis=-1
     )))
-    trigger_if(err > _G_TOL_C * default_tolerance, "AP-WCS-002")
+    tol_px = max(_G_TOL_C * default_tolerance, _wcs_angular_floor_px(wcs_obj))
+    trigger_if(err > tol_px, "AP-WCS-002")
 
 
 # --- Candidate H: spectral() m<->Hz<->J composition consistency -----------
@@ -1092,7 +1116,10 @@ def check_age_lookback_complementarity(cosmo, z, lookback_z_val):
     hubble_time_gyr = float(cosmo.hubble_time.to_value("Gyr"))
 
     err = abs((age0_val - age_z_val) - lookback_z_val)
-    tol = _M_TOL_C * _M_QUAD_TOL * abs(hubble_time_gyr)
+    # quad's tolerance is relative to the integral it returns, which for
+    # near-loitering models (E(z) ~ 0 over a range) can be many Hubble times;
+    # scale by the largest time involved, not the Hubble time alone.
+    tol = _M_TOL_C * _M_QUAD_TOL * max(abs(hubble_time_gyr), abs(age0_val), abs(age_z_val))
     trigger_if(err > tol, "AP-COSMO-002")
 
 
@@ -1207,12 +1234,28 @@ _P_TOL = 1e-8
 
 
 @_guard("biweight_affine_equivariance")
-def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
+def _biweight_center(M):
+    """Scalar value of the initial location ``M`` passed by a biweight hook,
+    or None when it is absent or not a single finite number."""
+    import numpy as np
+
+    if M is None:
+        return None
+    m = np.asarray(M, dtype=float)
+    if m.size != 1 or not np.isfinite(m.reshape(-1)[0]):
+        return None
+    return float(m.reshape(-1)[0])
+
+
+def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=None):
     """AP-STATS-002: biweight_location(a*x + b) == a*biweight_location(x) + b
     for a > 0 (LAW_CANDIDATES.md Candidate P). ``data``/``c``/``axis``/
     ``ignore_nan`` are the arguments a production call just used;
-    ``result`` is the value it returned. Re-calls biweight_location on an
-    affine-transformed copy of the same data; never mutates the original.
+    ``result`` is the value it returned. ``M`` is the initial location the
+    production call actually used (the median by default, or the caller's
+    value); it is a location, so the re-call receives ``a*M + b``.
+    Re-calls biweight_location on an affine-transformed copy of the same
+    data; never mutates the original.
     """
     import numpy as np
 
@@ -1227,13 +1270,22 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result):
         return
     if not np.isfinite(base):
         return
+    m_val = _biweight_center(M)
+    if M is not None and m_val is None:
+        return
 
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
     a = float(rng.uniform(2.0, 1e4))
     b = float(rng.uniform(-1e4, 1e4))
     transformed = a * arr + b
 
-    other = biweight_location(transformed, c=c, axis=axis, ignore_nan=ignore_nan)
+    other = biweight_location(
+        transformed,
+        c=c,
+        axis=axis,
+        ignore_nan=ignore_nan,
+        M=None if m_val is None else a * m_val + b,
+    )
     try:
         other_val = float(other)
     except (TypeError, ValueError):
@@ -1365,7 +1417,7 @@ _Q_DATA_COND_MAX = 500.0
 
 @_guard("biweight_scale_equivariance")
 def check_biweight_midvariance_equivariance(
-    data, c, axis, modify_sample_size, ignore_nan, result
+    data, c, axis, modify_sample_size, ignore_nan, result, M=None
 ):
     """AP-STATS-003: biweight_midvariance(a*x + b) == a**2 *
     biweight_midvariance(x) for any real a, b (LAW_CANDIDATES.md
@@ -1402,6 +1454,12 @@ def check_biweight_midvariance_equivariance(
     arr_mad = float(np.median(np.abs(arr - arr_median)))
     if not (np.isfinite(arr_mad) and arr_mad > 0):
         return
+    # Production centres the residuals on M (the median unless the caller
+    # supplied one), so the conditioning gates below use the same centre.
+    m_val = _biweight_center(M)
+    if M is not None and m_val is None:
+        return
+    centre = arr_median if m_val is None else m_val
 
     # Two conditioning mechanisms matter: subtracting the median depends on
     # |median|/MAD regardless of c, while the normalized residual depends on
@@ -1409,13 +1467,13 @@ def check_biweight_midvariance_equivariance(
     # gate incorrectly let huge c values hide catastrophic subtraction loss.
     if not (np.isfinite(c) and c > 0):
         return
-    data_cond = abs(arr_median) / (min(float(c), 1.0) * arr_mad)
+    data_cond = abs(centre) / (min(float(c), 1.0) * arr_mad)
     if data_cond > _Q_DATA_COND_MAX:
         return
     # A point exactly on the rejection edge |u| = 1 is counted or not by
     # rounding alone (the window is a step function), so n jumps by one under
     # a*x + b; the law applies away from the edge.
-    u_abs = np.abs(arr - arr_median) / (float(c) * arr_mad)
+    u_abs = np.abs(arr - centre) / (float(c) * arr_mad)
     if np.any(np.abs(u_abs - 1.0) < 1e-9):
         return
     # The estimator divides by [sum (1-u^2)(1-5u^2)]^2; when that sum nearly
@@ -1443,6 +1501,7 @@ def check_biweight_midvariance_equivariance(
         axis=axis,
         modify_sample_size=modify_sample_size,
         ignore_nan=ignore_nan,
+        M=None if m_val is None else a * m_val + b,
     )
     try:
         other_val = float(other)
@@ -1803,6 +1862,31 @@ _U_TOL = 50.0 * _EPS64
 _U_MAX_SIZE = 4096
 
 
+def _convolution_min_valid_weight(arr, ker, boundary, fill_value):
+    """Smallest, over all pixels, fraction of the (sum-normalized) kernel that
+    lands on finite input values, or None if it cannot be computed. Uses
+    scipy.ndimage directly so the checker never re-enters ``convolve``."""
+    import numpy as np
+
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return None
+    if any(k % 2 == 0 for k in ker.shape):
+        return None
+    ksum = float(np.sum(ker))
+    if not (np.isfinite(ksum) and ksum > 0):
+        return None
+    valid = np.isfinite(arr).astype(float)
+    if boundary == "wrap":
+        mode, cval = "wrap", 0.0
+    else:
+        # 'fill' pads with the (finite) fill value, i.e. valid pixels.
+        mode, cval = "constant", 1.0 if np.isfinite(fill_value) else 0.0
+    w = ndimage.convolve(valid, ker / ksum, mode=mode, cval=cval)
+    return float(np.min(w))
+
+
 @_guard("convolution_cross_implementation_agreement")
 def check_convolution_cross_implementation(
     array_internal,
@@ -1872,6 +1956,16 @@ def check_convolution_cross_implementation(
 
     diff = np.max(np.abs(res[finite_mask] - fft_res[finite_mask]))
     scale = max(1.0, float(np.max(np.abs(arr[np.isfinite(arr)]), initial=0.0)))
+    if not np.all(np.isfinite(arr)):
+        # NaN interpolation divides the FFT output by the kernel weight that
+        # falls on valid neighbours, so FFT rounding is amplified by
+        # 1/weight. Weights below sqrt(eps) are the documented ``min_wt``
+        # regime (interpolated far from any valid pixel): exclude them, and
+        # scale the tolerance by 1/weight above that.
+        min_w = _convolution_min_valid_weight(arr, ker, boundary, fill_value)
+        if min_w is None or min_w < _EPS64**0.5:
+            return
+        scale /= min_w
     # Direct summation contributes O(kernel.size) rounding while the FFT path
     # contributes O(log(array.size)); both are amplified by normalization.
     size_factor = max(float(ker.size), float(np.log2(arr.size)), 1.0)
