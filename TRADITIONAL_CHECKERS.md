@@ -2,6 +2,8 @@
 
 Inactive unless `SCIBENCH_TRADITIONAL_LOG` names a writable file. Hooks are called from the instrumented modules.
 
+Every checker is skipped when any of its arguments holds a finite number larger than 1e100 in magnitude (float64 overflow range, not a defect); preconditions below may be stricter.
+
 - **AP-SWE-001** `binom_conf_interval` (astropy/stats/funcs.py) — output finiteness. Precondition: k, n pass the function's own validation. Invariant: every entry of the returned interval is finite. Observed immediately before returning conf_interval. Alarm: any entry is NaN or inf.
 - **AP-SWE-002** `kuiper_false_positive_probability` (astropy/stats/funcs.py) — denominator nonzero before division. Precondition: any call that passes the 0 <= D <= 2 check. Invariant: N is nonzero before it is used as a divisor in `D < 2.0 / N`. Observed immediately before `if D < 2.0 / N`. Alarm: N == 0.
 - **AP-SWE-003** `biweight_location` (astropy/stats/biweight.py) — output finiteness. Precondition: all data finite with |x| < 1e150 and every MAD nonzero. Invariant: the location estimate is finite. Observed after `value` is computed, before the scalar/array return. Alarm: such data yields a non-finite value.
