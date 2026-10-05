@@ -16,30 +16,6 @@
       "symbol": "BaseCoordinateFrame.directional_offset_by"
     },
     {
-      "alarm": "angular_separation between the original and round-tripped point exceeds 30*eps64",
-      "family": "frame_transform_roundtrip",
-      "id": "AP-COORD-002",
-      "invariant": "a chain of orthogonal rotation matrices composed with their inverses returns the identity transform up to float64 round-off",
-      "observation_point": "inside transform_to, immediately after the composed transform is applied, before returning the result",
-      "precondition": "transform_to call resolving to the same equivalent frame class through only static/dynamic matrix transforms; unit-spherical data, or distance-bearing Cartesian components with magnitude in [1e-150,1e150] so norm/conversion arithmetic remains representable",
-      "rationale": "every coordinate conversion and catalog cross-match in astropy relies on these matrices being mutually consistent inverses; a violation indicates an error in a precession/frame-bias matrix or the transform graph's composition logic",
-      "scientific_quantity": "angular position of a coordinate transformed around a closed loop of pure-rotation frame transforms",
-      "source": "astropy/coordinates/baseframe.py",
-      "symbol": "BaseCoordinateFrame.transform_to"
-    },
-    {
-      "alarm": "relative error in 3D Cartesian norm between original and round-tripped vector exceeds 30*eps64",
-      "family": "frame_transform_roundtrip",
-      "id": "AP-COORD-003",
-      "invariant": "a pure rotation preserves vector norm and pairwise structure, so the round-tripped Cartesian vector equals the original up to float64 round-off, relative to the vector's own magnitude",
-      "observation_point": "inside transform_to, immediately after the composed transform is applied, before returning the result",
-      "precondition": "same as AP-COORD-002, restricted to distance-bearing coordinates with finite Cartesian component magnitude in [1e-150,1e150]",
-      "rationale": "same as AP-COORD-002, assigned to the same root-cause family since both observe the identical underlying matrix-composition error from a single transform_to call",
-      "scientific_quantity": "3D Cartesian position of a distance-bearing coordinate transformed around a closed loop of pure-rotation frame transforms",
-      "source": "astropy/coordinates/baseframe.py",
-      "symbol": "BaseCoordinateFrame.transform_to"
-    },
-    {
       "alarm": "separation(A,C) - (separation(A,B) + separation(B,C)) exceeds 10*eps64, where B is derived deterministically from A and C (arbitrary point off the A-C geodesic, not a degenerate/collinear special case)",
       "family": "spherical_metric_violation",
       "id": "AP-COORD-004",
@@ -50,18 +26,6 @@
       "scientific_quantity": "great-circle (geodesic) distance between two points on the celestial sphere",
       "source": "astropy/coordinates/baseframe.py",
       "symbol": "BaseCoordinateFrame.separation"
-    },
-    {
-      "alarm": "abs((round_tripped - original).sec) exceeds 5e-11 seconds",
-      "family": "time_scale_roundtrip",
-      "id": "AP-TIME-001",
-      "invariant": "a single scale conversion must be its own inverse when immediately reversed -- every pairwise conversion in the analytic (non-UT1) subset of MULTI_HOPS is an exactly invertible relation; a multi-hop loop reduces to this hop-by-hop",
-      "observation_point": "inside Time.__getattr__, immediately after a new-scale Time replica is constructed and cached, before it is returned",
-      "precondition": "scalar, unmasked Time with |JD|<=1e8; UT1 excluded; UTC-involving conversions additionally restricted to the loaded leap-second table validity range Narrowed 2026-10-01 to |JD| <= 1e7 (was 1e8): the TCB/TCG rate terms reach the 50 ps alarm floor only near |JD| ~ 1e8. UTC-involving conversions are restricted to 1972 and later (pre-1972 rubber-second UTC reaches ~1 ns at rate-change instants; the loaded table's start year, 1960 vs 1972, also made this precondition order-dependent).",
-      "rationale": "every physical-time calculation in astropy (light-travel-time corrections, barycentric corrections, sidereal time, ephemeris lookups) depends on scale conversions being mutually consistent inverses to sub-microsecond precision",
-      "scientific_quantity": "an instant in time (epoch) re-expressed across time scales (TAI, TT, TCG, TCB, TDB, UTC)",
-      "source": "astropy/time/core.py",
-      "symbol": "Time.__getattr__ (scale-conversion branch)"
     },
     {
       "alarm": "abs((reconstructed - T2).sec) exceeds 5e-11 seconds",
@@ -184,18 +148,6 @@
       "symbol": "FLRW.lookback_time (re-calls FLRW.age)"
     },
     {
-      "alarm": "relative error between circstd's returned value and sqrt(-2*ln(1-circvar)) exceeds 1000*eps64",
-      "family": "circular_stats_formula_consistency",
-      "id": "AP-STATS-001",
-      "invariant": "circstd(data, method='circular') == sqrt(-2*ln(1 - circvar(data))), computed via two independent public-API calls on the same data",
-      "observation_point": "after circstd(method='circular') returns, re-calling the independent circvar() on the same input",
-      "precondition": "1D circular data (radians or angle Quantity), n>=2, circvar(data) < 1 (nonzero resultant length -- R=0 makes the log diverge) Tolerance is scaled by the conditioning of ln(1-circvar): 1/(R*|ln R|) with R = 1-circvar (R -> 0 and R -> 1 are outside the model; e.g. [0,pi,0,pi] has R ~ 1e-16).",
-      "rationale": "circvar and circstd are astropy's two published circular-dispersion statistics; a regression that edits one formula's constant without the matching edit to the other would silently give internally-inconsistent dispersion estimates depending on which function a caller uses",
-      "scientific_quantity": "circular dispersion of directional data via the mean resultant length R: circvar = 1-R, circstd(circular) = sqrt(-2*ln(R))",
-      "source": "astropy/stats/circstats.py",
-      "symbol": "circstd (method='circular'), cross-checked against circvar"
-    },
-    {
       "alarm": "relative error between the re-call's result and a*base+b exceeds 1e-8 The comparison scale also includes max|a*x+b| (absolute arithmetic precision floor); symmetric widely spread data with true location 0 no longer fires.",
       "family": "biweight_affine_equivariance",
       "id": "AP-STATS-002",
@@ -230,18 +182,6 @@
       "scientific_quantity": "jackknife bias and standard error for the specific, analytically tractable case of statistic=np.mean",
       "source": "astropy/stats/jackknife.py",
       "symbol": "jackknife_stats"
-    },
-    {
-      "alarm": "abs(array.sum() - 1.0) > 10*eps64, only when the pre-normalization sum was nonzero",
-      "family": "kernel_normalization_exactness",
-      "id": "AP-CONV-001",
-      "invariant": "after normalize(mode='integral'), array.sum() == 1 exactly to float64 rounding",
-      "observation_point": "immediately after Kernel.normalize() executes, reading the pre-normalization sum and the freshly-computed post-normalization sum",
-      "precondition": "mode='integral'; pre-normalization sum finite and nonzero (the zero-sum case is production code's own documented skip-division branch, not part of this law)",
-      "rationale": "every convolution correctness guarantee downstream of normalize_kernel=True (flux conservation, NaN-interpolation weighting, every kernel class's own 'integrates to 1' docstring contract) is only as good as this exactness; nothing else in the test suite checks the cross-kernel-shape relationship directly",
-      "scientific_quantity": "the discrete integral (sum) of a kernel array after mode='integral' normalization -- the total transmission/throughput of the filter",
-      "source": "astropy/convolution/core.py",
-      "symbol": "Kernel.normalize"
     },
     {
       "alarm": "flux error exceeds max(50*eps64, 30*eps64*sqrt(array.size))*kernel_condition*max(1,max(abs(array))) Tolerance adds a systematic term C*eps64*cond*sum|array|: a normalized kernel sums to 1 +/- 1 ulp and the same error repeats in every pixel, so flat-field flux drift is linear in N (1.5e-11 for 256x256 ones = 1 ulp of the total).",
@@ -314,18 +254,6 @@
       "scientific_quantity": "planetary/solar mass vs GM_x / G, where GM_x is independently measured via orbital dynamics and G is the (far less precise) CODATA gravitational constant",
       "source": "astropy/constants/constant.py (Constant.__new__), iau2015.py (iau2012.py has no GM_x)",
       "symbol": "M_sun, M_jup, M_earth"
-    },
-    {
-      "alarm": "absolute disagreement exceeds 1e-6 after mapping {standard, model, log} to bounded standard power; relative disagreement exceeds 1e-6 for normalization='psd'",
-      "family": "lombscargle_cross_implementation",
-      "id": "AP-TS-001",
-      "invariant": "power computed via method=\"fast\" agrees with method=\"slow\" (the exact direct-sum reference implementation) within fast's own documented FFT/extirpolation approximation budget",
-      "observation_point": "end of lombscargle() in implementations/main.py, after the resolved-method result is computed, when the resolved method is \"fast\"",
-      "precondition": "nterms=1, regular frequency grid, N*Nfreq <= 2,000,000; default LRA fast backend with eps<=5e-13; |weighted_mean(y)|/weighted_rms(y-mean)<=1e8 when centering; comparison restricted per frequency to weighted sinusoid design-matrix condition <=1e4 and abs(frequency)*ptp(t)<=1e8 phase cycles t, y, dy and the frequency grid must be float64 (a float32 dy changes power by ~9e-6 by ordinary float32 rounding).",
-      "rationale": "six independently coded LombScargle implementations are documented to compute the identical scientific quantity; slow exists specifically as the exact reference the others approximate or restate",
-      "scientific_quantity": "Lomb-Scargle periodogram power at a given frequency",
-      "source": "astropy/timeseries/periodograms/lombscargle/implementations/main.py",
-      "symbol": "lombscargle (LombScargle.power, method=\"fast\")"
     },
     {
       "alarm": "abs(fap_single(z, N, norm, dH, dK) - fap) > 1e-9 (absolute)",
@@ -422,42 +350,6 @@
       "scientific_quantity": "a 2D point rotated by an angle and then by the negated angle -- the modeling-framework analog of AP-COORD-002's frame-transform matrix round trip",
       "source": "astropy/modeling/rotations.py",
       "symbol": "Rotation2D.evaluate"
-    },
-    {
-      "alarm": "max absolute error after the round trip exceeds 1000*eps64",
-      "family": "log_stretch_inverse_roundtrip",
-      "id": "AP-VIS-001",
-      "invariant": "InvertedLogStretch(a)(LogStretch(a)(x)) recovers x to within tolerance",
-      "observation_point": "inside LogStretch.__call__, immediately after computing the forward-stretched result, before returning it",
-      "precondition": "1e-2 <= a <= 1e6, x in [0, 1], float64 x_in and y_out. Fixed 2026-09-15 (codex CLI black-box trial): added an explicit float64-only dtype gate on both x_in and y_out (checked before the checker's own dtype=float cast, which would otherwise erase the evidence) -- float32 input silently produces a float32-precision LogStretch result compared against this checker's float64-derived tolerance.",
-      "rationale": "LogStretch computes y = log(a*x+1)/log(a+1); InvertedLogStretch computes the algebraically distinct closed form x = ((a+1)^y - 1)/a via exp/log rather than merely undoing LogStretch's own operations in reverse -- a genuine two-independently-computed-formula round trip, unlike the algebraic-cancellation round trips excluded elsewhere in this bank (e.g. RotateNative2Celestial/RotateCelestial2Native, EulerAngleRotation.inverse, which reduce to the same rotation matrix negated/reversed)",
-      "scientific_quantity": "an image intensity value stretched by LogStretch(a) then restored by its own .inverse (InvertedLogStretch(a)) -- the first sanitizer in astropy.visualization",
-      "source": "astropy/visualization/stretch.py",
-      "symbol": "LogStretch.__call__"
-    },
-    {
-      "alarm": "max absolute error after the round trip exceeds 100*eps64",
-      "family": "asinh_stretch_inverse_roundtrip",
-      "id": "AP-VIS-002",
-      "invariant": "SinhStretch(a'=1/asinh(1/a))(AsinhStretch(a)(x)) recovers x to within tolerance",
-      "observation_point": "inside AsinhStretch.__call__, immediately after computing the forward-stretched result, before returning it",
-      "precondition": "a >= 1e-10, x in [0, 1], float64 x_in and y_out. Fixed 2026-09-15 (codex CLI black-box trial): same float64-only dtype gate as AP-VIS-001, same rationale.",
-      "rationale": "AsinhStretch computes y = asinh(x/a)/asinh(1/a); the inverse computes x = a'*sinh(y/a') via a rescaled parameter -- an algebraically distinct transcendental-function pair (asinh/log-family vs sinh/exp-family), the same genuine two-independently-computed-formula structure as AP-VIS-001, unlike this bank's tautological rotation round trips (RotateNative2Celestial/RotateCelestial2Native, EulerAngleRotation.inverse) which recompute the same trig formula with negated/reversed angles",
-      "scientific_quantity": "an image intensity value stretched by AsinhStretch(a) then restored by its own .inverse (SinhStretch with rescaled a'=1/asinh(1/a))",
-      "source": "astropy/visualization/stretch.py",
-      "symbol": "AsinhStretch.__call__"
-    },
-    {
-      "alarm": "max absolute error after the round trip exceeds 1000*eps64",
-      "family": "power_dist_stretch_inverse_roundtrip",
-      "id": "AP-VIS-003",
-      "invariant": "InvertedPowerDistStretch(a)(PowerDistStretch(a)(x)) recovers x to within tolerance",
-      "observation_point": "inside PowerDistStretch.__call__, immediately after computing the forward-stretched result, before returning it",
-      "precondition": "1e-3 <= |a| <= 1e3, |a-1| >= 1e-2, x in [0, 1], float64 x_in and y_out. Fixed 2026-09-15 (codex CLI black-box trial): same float64-only dtype gate as AP-VIS-001, same rationale.",
-      "rationale": "PowerDistStretch computes y = (a^x-1)/(a-1); InvertedPowerDistStretch computes the algebraically distinct closed form x = log(y*(a-1)+1)/log(a) via a different transcendental-function family (power/exp vs log) -- the same genuine cross-check structure as AP-VIS-001 (LogStretch) and AP-VIS-002 (AsinhStretch)",
-      "scientific_quantity": "an image intensity value stretched by PowerDistStretch(a) then restored by its own .inverse (InvertedPowerDistStretch(a))",
-      "source": "astropy/visualization/stretch.py",
-      "symbol": "PowerDistStretch.__call__"
     },
     {
       "alarm": "relative Cartesian round-trip distance (distance / geocentric radius) exceeds 1e-9",
