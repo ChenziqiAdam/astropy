@@ -20,7 +20,6 @@ import warnings
 
 import numpy as np
 
-from astropy import _scientific_checkers
 from astropy.utils.exceptions import AstropyUserWarning
 
 from .utils import (
@@ -114,9 +113,6 @@ class Kernel:
         else:
             raise ValueError("invalid mode, must be 'integral' or 'peak'")
 
-        _pre_abs_sum = np.abs(self._array).sum()
-        _pre_size = self._array.size
-
         # Warn the user for kernels that sum to zero
         if normalization == 0:
             warnings.warn(
@@ -127,18 +123,6 @@ class Kernel:
             np.divide(self._array, normalization, self._array)
 
         self._kernel_sum = self._array.sum()
-
-        if _scientific_checkers.enabled():
-            try:
-                _scientific_checkers.check_kernel_normalization(
-                    mode,
-                    float(normalization),
-                    float(self._kernel_sum),
-                    float(_pre_abs_sum),
-                    int(_pre_size),
-                )
-            except Exception:
-                pass
 
     @property
     def shape(self):

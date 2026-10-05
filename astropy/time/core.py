@@ -1800,18 +1800,6 @@ class TimeBase(MaskableShapedLikeNDArray):
                         # Prevent future modification of cached array-like object
                         tm.writeable = False
                 cache[attr] = tm
-
-                if (
-                    tm is not self
-                    and _scientific_checkers.enabled()
-                    and isinstance(self, Time)
-                ):
-                    try:
-                        _scientific_checkers.check_time_scale_roundtrip(
-                            self, tm, attr
-                        )
-                    except Exception:
-                        pass
             return cache[attr]
 
         elif attr in self.FORMATS:

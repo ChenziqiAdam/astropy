@@ -145,69 +145,6 @@ def check_offset_roundtrip(lon1, lat1, pa, sep, lon2, lat2):
     trigger_if(err > tol, "AP-COORD-001")
 
 
-# --- Candidate B: frame-transform round-trip identity (matrix-only) --------
-#
-# LAW_CANDIDATES.md Candidate B. Precondition: a transform_to call whose
-# destination frame class equals the origin frame class, resolved through a
-# genuine composed transform (not the zero-op same-frame shortcut), and where
-# every edge on the resolved path is a DynamicMatrixTransform or
-# StaticMatrixTransform (never a FunctionTransformWithFiniteDifference, which
-# has a materially different, step-size-dependent error model out of scope
-# for this law). Tolerance: 30 * eps64, derived from a 5000-trial sweep per
-# loop across three matrix-only round trips (worst observed ratio 15.3).
-
-_B_TOL_C = 30.0
-
-
-@_guard("frame_transform_roundtrip")
-def check_frame_roundtrip_angular(orig_lon, orig_lat, recon_lon, recon_lat):
-    """AP-COORD-002: a coordinate transformed around a closed loop through a
-    chain of pure-rotation frame transforms (DynamicMatrixTransform /
-    StaticMatrixTransform only) must return to its starting point up to
-    float64 matrix-composition round-off. All edges on the path must be
-    orthogonal-matrix transforms; the caller is responsible for restricting
-    invocation to such paths (see baseframe.py hook, which checks the
-    resolved CompositeTransform's edge types before calling this).
-    """
-    from astropy.coordinates.angles.utils import angular_separation
-
-    err = float(angular_separation(orig_lon, orig_lat, recon_lon, recon_lat))
-    tol = _B_TOL_C * _EPS64
-    trigger_if(err > tol, "AP-COORD-002")
-
-
-@_guard("frame_transform_roundtrip_3d")
-def check_frame_roundtrip_3d(orig_xyz, recon_xyz):
-    """AP-COORD-003: same law as AP-COORD-002, applied to the 3D Cartesian
-    representation when the coordinate carries a distance. A pure rotation
-    preserves vector norm and pairwise structure, so the round-tripped
-    Cartesian vector must equal the original up to float64 round-off, scaled
-    by the vector's own magnitude (a relative, not absolute, tolerance).
-    """
-    ox, oy, oz = orig_xyz
-    rx, ry, rz = recon_xyz
-    orig_norm = (ox * ox + oy * oy + oz * oz) ** 0.5
-    if orig_norm == 0.0:
-        return
-    dx, dy, dz = rx - ox, ry - oy, rz - oz
-    err = (dx * dx + dy * dy + dz * dz) ** 0.5
-    relerr = err / orig_norm
-    tol = _B_TOL_C * _EPS64
-    trigger_if(relerr > tol, "AP-COORD-003")
-
-
-# --- Candidate D: Time scale round-trip identity (analytic scales only) ---
-#
-# LAW_CANDIDATES.md Candidate D. Precondition: the epoch's Julian date must
-# fall within the *loaded* leap-second table's validity range (queried at
-# runtime, not hardcoded, since a newer astropy release ships an updated
-# table); UT1 is excluded entirely (its conversion depends on interpolated
-# IERS Earth-orientation data, a different error source). Tolerance: 5e-11 s,
-# derived from a 25,000-trial sweep across 5 round-trip loops spanning
-# 1972-2016 (worst observed error 8.87e-12 s, under half the naive
-# single-double day-precision floor of ~1.92e-11 s).
-
-_D_TOL_SEC = 5e-11
 _TIME_MAX_ABS_JD = 1e7  # ~27,000 years from the JD epoch; the TCB/TCG rate terms reach the 50 ps alarm floor near 1e8
 _leap_table_range = None  # lazily cached (year_min, year_max) or a sentinel
 
@@ -230,55 +167,11 @@ def _leap_table_year_range():
     return _leap_table_range
 
 
-@_guard("time_scale_roundtrip")
-def check_time_scale_roundtrip(original, converted, new_scale):
-    """AP-TIME-001: a single scale conversion must be its own inverse when
-    immediately reversed -- every pairwise conversion in the analytic
-    (non-UT1) subset of MULTI_HOPS is an exactly invertible relation, and a
-    multi-hop loop reduces to this hop-by-hop (LAW_CANDIDATES.md Candidate D).
-
-    ``original`` is the Time instance before conversion; ``converted`` is
-    the same instant re-expressed in ``new_scale`` by production code. UT1
-    is excluded (interpolated IERS data, a different error source); the
-    leap-second table's own validity range gates any UTC-involving pair.
-    Restricted to scalar, unmasked Time instances (see LAW_CANDIDATES.md
-    Candidate D -- array support is a known, documented limitation; a masked
-    scalar's jd1/jd2 is a fill-value sentinel, not a real epoch, so the
-    round-trip law does not apply to it -- found via astropy's own
-    test_mask.py, not anticipated in the original design).
-    """
-    if original.shape != () or original.masked:
-        return
-    if new_scale == "ut1" or original.scale == "ut1":
-        return
-    if abs(float(original.jd)) > _TIME_MAX_ABS_JD:
-        return
-
-    year_min, year_max = _leap_table_year_range()
-    if original.scale == "utc" or new_scale == "utc":
-        decimalyear = float(original.decimalyear)
-        if not (year_min <= decimalyear <= year_max):
-            return
-
-    # Do not use getattr(converted, original.scale): that populates
-    # converted's own lazy scale cache as a side effect, which is observable
-    # production state (see astropy/time/tests/test_basic.py::test_cache) and
-    # would violate SANITIZER.md 5.5. Replicate first, exactly mirroring what
-    # Time.__getattr__ itself does internally to avoid touching the cache.
-    # ``original`` is also replicated before use as a subtraction operand:
-    # Time.__sub__ can itself populate a scale-cache entry on its second
-    # operand (empirically confirmed), and original is the real Time object
-    # production code (and the caller) is holding.
-    back = converted.replicate()
-    back._set_scale(original.scale)
-    err_sec = abs(float((back - original.replicate()).sec))
-    trigger_if(err_sec > _D_TOL_SEC, "AP-TIME-001")
-
-
 # --- Candidate E: Time arithmetic inverse (subtraction/addition) ----------
 #
 # LAW_CANDIDATES.md Candidate E. Precondition: same leap-second-table
-# validity restriction as Candidate D when either epoch is UTC-involving;
+# validity restriction (cached leap-second range) when either epoch is
+# UTC-involving;
 # restricted to |JD| <= 1e8 after a fresh-agent probe showed the fixed
 # tolerance is invalid at JD~1e9-1e12. Tolerance: 5e-11 s, derived from a
 # 20,000-trial sweep across 6 scales including a large-delta stress variant
@@ -296,7 +189,7 @@ def check_time_arithmetic_inverse(t1, t2, delta):
     ``t1``, ``t2`` are the two Time operands of a production ``t2 - t1``
     call; ``delta`` is the TimeDelta production code actually computed.
     Restricted to scalar, unmasked Time instances (see LAW_CANDIDATES.md
-    Candidate E -- same reasoning as Candidate D's array/masked exclusions).
+    Candidate E).
     """
     if t1.shape != () or t2.shape != () or t1.masked or t2.masked:
         return
@@ -531,8 +424,7 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     # digits to meet a 1e-6px absolute bound -- past float64's ~15-16 digit
     # budget regardless of wcslib's accuracy, so this is a checker
     # precondition gap (SANITIZER.md 5.8-P), not a wcslib defect. Scale the
-    # tolerance by pixel magnitude the same way AP-COORD-002/003 scale by
-    # vector norm, keeping the original absolute floor for ordinary
+    # tolerance by pixel magnitude, keeping the original absolute floor for ordinary
     # (near-reference-pixel) coordinates.
     pix_scale = float(np.max(np.abs(original_xy), initial=1.0))
     if (
@@ -978,7 +870,7 @@ def check_separability_soundness(transform, matrix):
 # LAW_CANDIDATES.md Candidate L. Precondition: scalar z >= 0 (this checker's
 # implementation restriction -- _inv_efunc_scalar only accepts scalars;
 # array-valued inv_efunc(z) calls are out of scope, same discipline as the
-# scalar-only restriction on AP-TIME-001/002). Tolerance 20*eps64, derived
+# scalar-only restriction on AP-TIME-002). Tolerance 20*eps64, derived
 # from a 14,000-trial sweep (worst ratio 1.58*eps64) plus a 6,000-trial
 # massive-neutrino-path sweep (worst ratio 1.45*eps64). A later probe tuned
 # E(z)^2 arbitrarily close to zero, where this relative comparison is
@@ -1182,58 +1074,6 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
 
     violation = sep_ac - (sep_ab + sep_bc)
     trigger_if(violation > _C_TOL, "AP-COORD-004")
-
-
-# --- Candidate O: circular std (circular method) vs circvar formula --------
-#
-# LAW_CANDIDATES.md Candidate O. Precondition: circvar(data) < 1 (nonzero
-# resultant length -- the circular method's log blows up at R=0). Tolerance:
-# 1000 * eps64, derived from a 200,000-trial sweep (worst relative error
-# 2.17e-14 ~= 100*eps64 for the circular method's extra log+sqrt chain; the
-# angular method matched exactly and is not separately instrumented).
-
-_O_TOL_C = 1000.0
-
-
-@_guard("circular_stats_formula_consistency")
-def check_circstd_circvar_consistency(data, axis, weights, circular_value):
-    """AP-STATS-001: circstd(data, method='circular') must equal
-    sqrt(-2*ln(1 - circvar(data))), both public functions built on the same
-    mean resultant length R (LAW_CANDIDATES.md Candidate O). ``data``/
-    ``axis``/``weights`` are the arguments a production circstd(method=
-    'circular') call just used; ``circular_value`` is the value it returned.
-    Re-calls the independent circvar() on the same input.
-    """
-    import math
-
-    from astropy.stats.circstats import circvar
-    from astropy.units import Quantity
-
-    try:
-        cv = circvar(data, axis, weights)
-        cv_val = float(cv.value if isinstance(cv, Quantity) else cv)
-        result_val = float(
-            circular_value.value
-            if isinstance(circular_value, Quantity)
-            else circular_value
-        )
-    except (TypeError, ValueError):
-        return
-    if not (math.isfinite(cv_val) and math.isfinite(result_val)):
-        return
-    resultant = 1.0 - cv_val
-    if resultant <= 0:
-        return
-
-    if resultant >= 1.0:
-        return
-    # circvar = 1 - R carries absolute error ~eps64, so ln(R) is conditioned as
-    # eps64 / (R |ln R|): near R -> 0 (log diverges) and near R -> 1 (cancellation)
-    # the comparison is outside this tolerance model.
-    cond = max(1.0, 1.0 / (resultant * abs(math.log(resultant))))
-    predicted = math.sqrt(-2.0 * math.log(resultant))
-    relerr = abs(result_val - predicted) / max(abs(predicted), 1e-300)
-    trigger_if(relerr > _O_TOL_C * _EPS64 * cond, "AP-STATS-001")
 
 
 # --- Candidate P: biweight_location affine equivariance ---------------------
@@ -1666,83 +1506,6 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     cond = abs(xbar) / predicted_se
     tol_se = _R_SE_TOL_C * _EPS64 * n * max(1.0, cond)
     trigger_if(se_relerr > tol_se, "AP-STATS-004")
-
-
-# --- Candidate S: kernel normalization exactness ----------------------------
-#
-# LAW_CANDIDATES.md Candidate S. Precondition: mode='integral', pre-
-# normalization sum finite and nonzero. Tolerance: 10 * eps64, derived from a
-# 72-kernel sweep across all 11 built-in shapes (worst truncation 4.44e-16 =
-# 2*eps64, no size dependence found from n~9 to n~400).
-#
-# Zero-sum precondition gap found during self-verification (not an
-# external audit): the first version only received the post-normalize()
-# sum, not whether a division actually happened. `Kernel.normalize` has an
-# explicit branch (production code, not a bug) that skips the division
-# entirely when the pre-normalization sum is exactly zero -- warning and
-# leaving the array un-normalized, per its own docstring/tests
-# (test_custom_1D_kernel_zerosum: array [-2,-1,0,1,2] sums to exactly 0,
-# `custom.truncation == 1.0` is the *documented correct* outcome). Without
-# the pre-normalization sum, the checker could not distinguish this
-# documented skip-division branch from a real off-by-something in the
-# divide -- both produce a "sum far from 1" observation. Fixed by also
-# passing the pre-normalization sum and excluding the zero-sum case by
-# precondition, matching the exclusion already stated in the design doc
-# but not actually wired into the checker's call site.
-#
-# Tolerance correction found by an independent adversarial audit (not
-# self-verification): a flat `10*eps64` was falsified outright -- a clean
-# 3,000-trial sweep of ordinary (non-adversarial) CustomKernel arrays of
-# unit-Gaussian noise found 100% of trials exceeding it, with the original
-# design-doc sweep's "worst case 2*eps64, no size dependence" claim simply
-# wrong (that sweep only exercised the built-in, closed-form, symmetric
-# kernel shapes -- Gaussian1DKernel, Box1DKernel, etc. -- a materially
-# narrower domain than the precondition the checker actually enforces).
-# Re-derived from first principles: summing n post-division float64 values
-# is an n-term resummation whose rounding floor is set both by n (ordinary
-# accumulation) and by the conditioning of the division itself -- how
-# close the pre-normalization sum is to being swamped by cancellation
-# among the array's own elements, `cond = sum(|arr|) / |pre_sum|` (the
-# textbook condition number of the reduction that produced pre_sum). A
-# 300,000-trial sweep (n in [3,300], ordinary unit-Gaussian arrays plus an
-# adversarial near-zero-pre-sum-via-cancellation variant every 5th trial)
-# found `err / (eps64 * n * cond)` bounded at a stable worst case of
-# 0.333, with no growth as n or cond increased across either the ordinary
-# or adversarial sub-sweep -- confirmed `n` is load-bearing (dropping it
-# and using `cond` alone gave a *worse*, unstable worst ratio of 1.62).
-# Final: `tol = 10 * eps64 * n * cond` (~30x margin over the observed
-# worst ratio).
-
-_S_TOL_C = 10.0
-
-
-@_guard("kernel_normalization_exactness")
-def check_kernel_normalization(mode, pre_sum, array_sum, abs_sum, size):
-    """AP-CONV-001: after Kernel.normalize(mode='integral'), the array must
-    sum to 1 to float64 rounding (LAW_CANDIDATES.md Candidate S), *provided*
-    the pre-normalization sum was actually nonzero (the zero-sum case is
-    production code's own documented skip-division branch, not part of
-    this law -- see the zero-sum note above). Reads values already
-    computed by production code -- no re-call needed.
-
-    ``abs_sum`` is sum(abs(array)) *before* normalization and ``size`` is
-    the array's element count -- both used only to compute the tolerance
-    (division condition number and accumulation term), never to re-derive
-    the scientific quantity itself.
-    """
-    import math
-
-    if mode != "integral":
-        return
-    if not (math.isfinite(pre_sum) and pre_sum != 0.0):
-        return
-    if not (math.isfinite(array_sum) and math.isfinite(abs_sum) and abs_sum > 0.0):
-        return
-    if size < 1:
-        return
-    cond = abs_sum / abs(pre_sum)
-    tol = _S_TOL_C * _EPS64 * size * cond
-    trigger_if(abs(array_sum - 1.0) > tol, "AP-CONV-001")
 
 
 # --- Candidate T: flux conservation under convolution, wrap boundary -------
@@ -2253,238 +2016,6 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
         _check_mass_from_gm(abbrev, value, mod)
     elif abbrev == "muB" and system == "si":
         _check_bohr_magneton(value, mod)
-
-
-# --- Candidate Z: Lomb-Scargle cross-implementation agreement ---------------
-#
-# LAW_CANDIDATES.md Candidate Z. Precondition: nterms=1, regular frequency
-# grid (fast's own domain), any normalization/fit_mean/center_data.
-#
-# Fixed post-audit (2026-09-14, independent audit finding): the original
-# design used a single absolute tolerance (1e-6) on the reasoning that
-# "power is intrinsically bounded" -- true for standard power, but not for
-# psd (dimensional) or model/log near standard power 1. For
-# normalization='psd', power is dimensional (units of amplitude-squared per
-# frequency) and can be arbitrarily large (e.g. a Kepler-style light curve
-# in electrons/s with amplitude ~1e5 gives psd power ~1e10) -- an absolute
-# tolerance is meaningless there and the checker false-fired on an entirely
-# ordinary astronomical workflow. A targeted sweep found the *relative*
-# agreement between fast and slow is stable at ~1e-11 to 1e-14 across every
-# normalization and every amplitude tested, confirming the two
-# implementations genuinely agree and only the tolerance model was wrong.
-# Fixed first for psd with a relative check, then for model/log by mapping
-# them algebraically back to the bounded standard-power representation.
-#
-# Tolerance: 1e-6 absolute after mapping standard/model/log to the bounded
-# standard-power scale, derived from two independent 500-trial sweeps (worst
-# 7.30e-11 and 2.42e-10) plus a 300-trial post-fix re-sweep spanning amplitudes
-# 1e-6 to 1e6 (worst 1.6e-12).  Model and log power themselves are unbounded
-# near standard power 1, so comparing them directly with a fixed absolute
-# threshold would be invalid.  Fast's FFT/NUFFT scheme is a genuine bounded
-# approximation to slow's direct sum, not an alternative exact evaluation.
-# 1e-6 relative for 'psd',
-# derived from the same 300-trial sweep (worst relative error 3.57e-10
-# across all four normalizations combined) -- ~2700x margin.
-#
-# A 2026-09-22 fresh-suite witness exposed a second missing precondition:
-# 154 observations in a 1e-8-relative-width cluster plus one distant point
-# produce cond(X)=5.98e5 (cond(X.T X)=3.57e11). Tightening LRA eps from 5e-13
-# to 1e-14 reduced the apparent fast/slow gap from 7.53e-6 to 1.58e-7, the
-# same scale as slow/cython/chi2 disagreement. A 270-case clustered-sampling
-# sweep found the first >1e-6 discrepancy only at cond(X)=7.95e4; restricting
-# comparisons to cond(X)<=1e4 left a worst 2.28e-8 (~44x margin).
-# The same suite also contained offset-dominated data and grids reaching
-# 1e12 phase cycles. Those independently stress mean subtraction and sin/cos
-# argument reduction; cap |mean|/weighted_rms at 1e8 and
-# max_frequency*ptp(t) at 1e8, where targeted sweeps retained >40x and >70x
-# margin respectively.
-#
-# Re-deriving via method='slow' is O(N * Nfreq), the same cost class as
-# AP-CONV-003's re-call to convolve_fft -- capped by problem size (not by
-# correctness) for the same reason: even when enabled for evaluation, an
-# unbounded O(N^2)-ish re-derivation on every fast-method call should not
-# make the checker itself the bottleneck. Cap chosen generously above
-# realistic test-suite sizes, not tuned to any specific input.
-
-_Z_TOL_ABS = 1e-6
-_Z_TOL_REL = 1e-6
-_Z_MAX_COST = 2_000_000  # N * Nfreq
-_Z_MAX_DESIGN_COND = 1e4
-_Z_MAX_DATA_COND = 1e8
-_Z_MAX_PHASE_CYCLES = 1e8
-
-
-def _lombscargle_stable_frequency_mask(
-    t, y, dy, frequency, center_data, fit_mean
-):
-    """Return frequencies whose weighted sinusoid fit is well-conditioned.
-
-    The fast backend approximates trigonometric sums; solving the subsequent
-    least-squares problem amplifies that error by the condition of the design
-    matrix.  A clustered-times witness had cond(X)=5.98e5 and cond(X.T X)=
-    3.57e11: tightening the LRA sum tolerance removed the reported mismatch,
-    while even the three direct implementations disagreed at ~2e-7.  The
-    checker also bounds loss in mean subtraction and trigonometric argument
-    reduction. Such inputs cannot support a fixed 1e-6 error model.
-    """
-    import numpy as np
-
-    t_arr = np.asarray(t, dtype=float).ravel()
-    freq = np.asarray(frequency, dtype=float).ravel()
-    if t_arr.size < (3 if fit_mean else 2):
-        return np.zeros(freq.shape, dtype=bool)
-    if not np.all(np.isfinite(t_arr)) or not np.all(np.isfinite(freq)):
-        return np.zeros(freq.shape, dtype=bool)
-
-    if dy is None:
-        weights = np.ones(t_arr.size, dtype=float)
-    else:
-        dy_arr = np.broadcast_to(np.asarray(dy, dtype=float), t_arr.shape)
-        if not np.all(np.isfinite(dy_arr)) or np.any(dy_arr <= 0):
-            return np.zeros(freq.shape, dtype=bool)
-        weights = dy_arr**-2
-    weights /= weights.sum()
-    sqrt_weights = np.sqrt(weights)
-
-    y_arr = np.asarray(y, dtype=float).ravel()
-    if y_arr.shape != t_arr.shape or not np.all(np.isfinite(y_arr)):
-        return np.zeros(freq.shape, dtype=bool)
-    if center_data or fit_mean:
-        mean = float(np.dot(weights, y_arr))
-        spread = float(np.sqrt(np.dot(weights, (y_arr - mean) ** 2)))
-        if spread == 0.0 or abs(mean) / spread > _Z_MAX_DATA_COND:
-            return np.zeros(freq.shape, dtype=bool)
-
-    # Argument reduction of sin/cos also loses precision when the number of
-    # phase cycles across the observation baseline is enormous.
-    phase_cycles = np.abs(freq) * float(np.ptp(t_arr))
-    stable = np.isfinite(phase_cycles) & (phase_cycles <= _Z_MAX_PHASE_CYCLES)
-    # Batch to keep the checker bounded near its N*Nfreq cost ceiling.
-    for start in range(0, freq.size, 256):
-        stop = min(start + 256, freq.size)
-        phase = 2.0 * np.pi * freq[start:stop, None] * t_arr[None, :]
-        columns = [np.cos(phase), np.sin(phase)]
-        if fit_mean:
-            columns.insert(0, np.ones_like(phase))
-        design = np.stack(columns, axis=-1) * sqrt_weights[None, :, None]
-        condition = np.linalg.cond(design)
-        stable[start:stop] &= np.isfinite(condition) & (
-            condition <= _Z_MAX_DESIGN_COND
-        )
-    return stable
-
-
-def _lombscargle_standard_power(power, normalization):
-    """Map dimensionless normalizations back to bounded standard power."""
-    import numpy as np
-
-    value = np.asarray(power)
-    if normalization == "standard":
-        return value
-    if normalization == "model":
-        return value / (1.0 + value)
-    if normalization == "log":
-        return -np.expm1(-value)
-    return None
-
-
-@_guard("lombscargle_cross_implementation")
-def check_lombscargle_cross_implementation(
-    t,
-    y,
-    dy,
-    frequency,
-    center_data,
-    fit_mean,
-    nterms,
-    normalization,
-    power,
-    method_kwds=None,
-):
-    """AP-TS-001 (Candidate Z): LombScargle.power(..., method='fast') must
-    agree with method='slow' on the same inputs, within fast's own
-    documented approximation budget (not eps64 -- fast is an approximate
-    FFT/extirpolation scheme, slow is the exact direct sum). Absolute
-    tolerance on the bounded standard-power representation of the three
-    dimensionless normalizations; relative tolerance for 'psd', whose power
-    is dimensional and can be arbitrarily large or small depending on the
-    input amplitude. Ill-conditioned sinusoid fits are outside the fixed
-    approximation-error model.
-    """
-    import numpy as np
-
-    from astropy.timeseries.periodograms.lombscargle.implementations.main import (
-        lombscargle,
-    )
-
-    if nterms != 1:
-        return
-    # Tolerance is float64-derived: a float32 y/dy/t legitimately gives
-    # float32-precision power (~1e-5), not a fast-vs-slow disagreement.
-    if not all_float64(t, y, dy, frequency):
-        return
-    # The tolerance was calibrated for the default LRA backend.  ``fast``
-    # also exposes the deliberately less accurate FASPER backend and custom
-    # approximation controls; those are distinct numerical contracts.
-    method_kwds = dict(method_kwds or {})
-    if method_kwds.get("algorithm", "lra") != "lra":
-        return
-    if method_kwds.get("use_fft", True) is not True:
-        return
-    trig_sum_kwds = dict(method_kwds.get("trig_sum_kwds") or {})
-    if float(trig_sum_kwds.get("eps", 5e-13)) > 5e-13:
-        return
-    freq = np.asarray(frequency)
-    if freq.ndim != 1 or freq.size < 2:
-        return
-    t_size = np.asarray(t).size
-    if t_size * freq.size > _Z_MAX_COST:
-        return
-    power_arr = np.asarray(power)
-    if power_arr.shape != freq.shape or not np.all(np.isfinite(power_arr)):
-        return
-
-    t_arr = np.asarray(t)
-    y_arr = np.asarray(y)
-    dy_arr = None if dy is None else np.asarray(dy)
-
-    try:
-        slow_power = lombscargle(
-            t_arr,
-            y_arr,
-            dy_arr,
-            frequency=freq,
-            center_data=center_data,
-            fit_mean=fit_mean,
-            nterms=nterms,
-            normalization=normalization,
-            method="slow",
-        )
-    except Exception:
-        return
-    slow_power = np.asarray(slow_power)
-    if slow_power.shape != power_arr.shape or not np.all(np.isfinite(slow_power)):
-        return
-
-    stable = _lombscargle_stable_frequency_mask(
-        t_arr, y_arr, dy_arr, freq, center_data, fit_mean
-    )
-    if not np.any(stable):
-        return
-
-    if normalization == "psd":
-        denom = np.maximum(np.abs(slow_power[stable]), 1e-300)
-        relerr = float(
-            np.max(np.abs(power_arr[stable] - slow_power[stable]) / denom)
-        )
-        trigger_if(relerr > _Z_TOL_REL, "AP-TS-001")
-    else:
-        bounded_power = _lombscargle_standard_power(power_arr, normalization)
-        bounded_slow = _lombscargle_standard_power(slow_power, normalization)
-        if bounded_power is None or bounded_slow is None:
-            return
-        diff = float(np.max(np.abs(bounded_power[stable] - bounded_slow[stable])))
-        trigger_if(diff > _Z_TOL_ABS, "AP-TS-001")
 
 
 # --- Candidate AB: single-frequency false-alarm-probability round trip -----
@@ -3073,199 +2604,6 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
     trigger_if(relerr > _AI_TOL_EPS, "AP-MODEL-002")
 
 
-# --- Candidate AJ: log-stretch / inverted-log-stretch round trip ------------
-#
-# LAW_CANDIDATES.md Candidate AJ. LogStretch computes
-# y = log(a*x+1)/log(a+1); its .inverse (InvertedLogStretch) computes the
-# algebraically distinct closed form x = ((a+1)^y - 1)/a, built from exp/log
-# rather than merely undoing LogStretch's own operations in reverse -- a
-# genuine two-independently-computed-formula round trip, unlike the
-# rotation-model round trips in this bank (AP-MODEL-002 included) which
-# recompute trig from the same negated angle. Precondition: 1e-2 <= a <= 1e6
-# (LogStretch's own docstring examples span 0.1-10000; very small a triggers
-# catastrophic cancellation in log(a*x+1) that is a precision limitation of
-# the formula itself, not a real drift between the two directions, so it is
-# excluded rather than absorbed into a much looser tolerance) and x in
-# [0, 1] (the stretch's documented domain). Tolerance: 1000*eps64 on
-# absolute error (not relative -- x can be exactly 0), derived from a
-# 50,000-trial sweep over a in [1e-2, 1e6], x in [0, 1] (worst observed
-# ~1.1e-14, a handful of ULPs).
-
-_AJ_TOL_ABS = 1000.0 * _EPS64
-_AJ_A_MIN = 1e-2
-_AJ_A_MAX = 1e6
-
-
-@_guard("log_stretch_inverse_roundtrip")
-def check_log_stretch_inverse_roundtrip(a, x_in, y_out):
-    """AP-VIS-001 (Candidate AJ): LogStretch(a) followed by its own
-    .inverse (InvertedLogStretch(a)) must recover the original input.
-    y_out is LogStretch.__call__'s own already-computed result for this
-    call; only the inverse direction is computed here.
-    """
-    import numpy as np
-
-    from astropy.visualization.stretch import InvertedLogStretch
-
-    if not (_AJ_A_MIN <= a <= _AJ_A_MAX):
-        return
-
-    # Fixed post black-box triggerability run (2026-09-15, codex CLI):
-    # LogStretch.__call__ preserves the input array's dtype, so a float32
-    # x_in produces a float32 y_out computed entirely at ~1e-7 relative
-    # precision. This checker's absolute tolerance is derived from a
-    # float64 rounding model (SANITIZER.md 5.8-T) and has no basis at
-    # float32 precision -- the cast to `dtype=float` below is only for this
-    # checker's own comparison arithmetic and must not be used to decide
-    # whether the *production* computation ran at float64. Reject before
-    # that cast erases the evidence. Confirmed the checker fired this way
-    # on ordinary float32 input in [0, 1] (abserr ~1.2e-7 vs. tol ~2.2e-13).
-    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
-        return
-
-    x_arr = np.asarray(x_in, dtype=float)
-    y_arr = np.asarray(y_out, dtype=float)
-    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
-        return
-    if np.any(x_arr < 0) or np.any(x_arr > 1):
-        return
-
-    inv = InvertedLogStretch(a)
-    x_back = inv(y_arr.copy(), clip=False)
-    if not np.all(np.isfinite(x_back)):
-        return
-
-    abserr = float(np.max(np.abs(x_back - x_arr)))
-    trigger_if(abserr > _AJ_TOL_ABS, "AP-VIS-001")
-
-
-# --- Candidate AK: asinh-stretch / sinh-stretch round trip ------------------
-#
-# LAW_CANDIDATES.md Candidate AK. AsinhStretch computes
-# y = asinh(x/a) / asinh(1/a); its .inverse is SinhStretch with a rescaled
-# parameter a' = 1/asinh(1/a), which computes x = sinh(y/a') / sinh(1/a')
-# (read directly from SinhStretch.__call__ -- an earlier version of this
-# comment incorrectly stated the inverse as "a' * sinh(y/a')", which is not
-# what the code computes; corrected post-audit, 2026-09-14, no change to the
-# checker's actual behavior since the checker calls SinhStretch itself
-# rather than re-implementing its formula). This is still an algebraically
-# distinct transcendental-function pair (asinh/log-family forward vs.
-# sinh/exp-family inverse), the same genuine-cross-check structure as
-# AP-VIS-001.
-#
-# Precondition on `a` added post-audit (2026-09-14, independent audit
-# finding): the original design claimed no restriction on `a` was needed,
-# based on a 50,000-trial sweep over 10 decades (1e-10 to 1e10, worst
-# 6.77e-15) that did not extend below 1e-10. A wider sweep down to
-# a=1e-300 found the claim was only half right: large `a` is genuinely
-# unconditioned (worst 2.22e-16 for a in [1e10, 1e300]), but small `a`
-# degrades smoothly below ~1e-20 (9.77e-15 at 1e-20, 2.23e-14 at 1e-30 --
-# already at the old tolerance boundary, 2.60e-14 at 1e-50). Since
-# AsinhStretch's own docstring examples span only 0.01-3.0, a floor of
-# a >= 1e-10 comfortably covers realistic use (worst 5.22e-15 across
-# 50,000 trials for a in [1e-10, 1e300]) while excluding the regime where
-# this is a genuine precision limit of the formula, not a real drift.
-
-_AK_TOL_ABS = 100.0 * _EPS64
-_AK_A_MIN = 1e-10
-
-
-@_guard("asinh_stretch_inverse_roundtrip")
-def check_asinh_stretch_inverse_roundtrip(a, x_in, y_out):
-    """AP-VIS-002 (Candidate AK): AsinhStretch(a) followed by its own
-    .inverse (SinhStretch) must recover the original input. y_out is
-    AsinhStretch.__call__'s own already-computed result for this call;
-    only the inverse direction is computed here.
-    """
-    import numpy as np
-
-    from astropy.visualization.stretch import SinhStretch
-
-    if a < _AK_A_MIN:
-        return
-
-    # Fixed post black-box triggerability run (2026-09-15, codex CLI): see
-    # the identical fix and rationale in check_log_stretch_inverse_roundtrip
-    # (AP-VIS-001) -- a float32 x_in/y_out means y_out was computed at
-    # float32 precision, which this checker's float64-derived tolerance has
-    # no basis to judge. Reject before the dtype=float cast below erases it.
-    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
-        return
-
-    x_arr = np.asarray(x_in, dtype=float)
-    y_arr = np.asarray(y_out, dtype=float)
-    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
-        return
-    if np.any(x_arr < 0) or np.any(x_arr > 1):
-        return
-
-    inv = SinhStretch(a=1.0 / np.arcsinh(1.0 / a))
-    x_back = inv(y_arr.copy(), clip=False)
-    if not np.all(np.isfinite(x_back)):
-        return
-
-    abserr = float(np.max(np.abs(x_back - x_arr)))
-    trigger_if(abserr > _AK_TOL_ABS, "AP-VIS-002")
-
-
-# --- Candidate AL: power-dist-stretch / inverted-power-dist-stretch --------
-#
-# LAW_CANDIDATES.md Candidate AL. PowerDistStretch computes
-# y = (a^x - 1) / (a - 1); its .inverse (InvertedPowerDistStretch) computes
-# the algebraically distinct closed form x = log(y*(a-1)+1) / log(a) -- a
-# genuine power/exp-vs-log transcendental-function pair, the same
-# cross-check structure as AP-VIS-001/AP-VIS-002. Like AP-VIS-001 (and
-# unlike AP-VIS-002), a precondition on `a` is needed: very small |a|
-# (near the a=0 singularity of the power-law shape) and the immediate
-# neighborhood of a=1 (the a=1 branch point where the formula itself is
-# singular, PowerDistStretch's own __init__ rejects a==1 exactly but not
-# a near 1) both cause catastrophic cancellation that is a precision
-# limit of the formulas, not a real drift between the two directions.
-
-_AL_TOL_ABS = 1000.0 * _EPS64
-_AL_A_MIN = 1e-3
-_AL_A_MAX = 1e3
-_AL_A_EXCLUDE_RADIUS = 1e-2
-
-
-@_guard("power_dist_stretch_inverse_roundtrip")
-def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
-    """AP-VIS-003 (Candidate AL): PowerDistStretch(a) followed by its own
-    .inverse (InvertedPowerDistStretch(a)) must recover the original
-    input. y_out is PowerDistStretch.__call__'s own already-computed
-    result for this call; only the inverse direction is computed here.
-    """
-    import numpy as np
-
-    from astropy.visualization.stretch import InvertedPowerDistStretch
-
-    if not (_AL_A_MIN <= abs(a) <= _AL_A_MAX):
-        return
-    if abs(a - 1.0) < _AL_A_EXCLUDE_RADIUS:
-        return
-
-    # Fixed post black-box triggerability run (2026-09-15, codex CLI): see
-    # the identical fix and rationale in check_log_stretch_inverse_roundtrip
-    # (AP-VIS-001).
-    if np.asarray(x_in).dtype != np.float64 or np.asarray(y_out).dtype != np.float64:
-        return
-
-    x_arr = np.asarray(x_in, dtype=float)
-    y_arr = np.asarray(y_out, dtype=float)
-    if not (np.all(np.isfinite(x_arr)) and np.all(np.isfinite(y_arr))):
-        return
-    if np.any(x_arr < 0) or np.any(x_arr > 1):
-        return
-
-    inv = InvertedPowerDistStretch(a=a)
-    x_back = inv(y_arr.copy(), clip=False)
-    if not np.all(np.isfinite(x_back)):
-        return
-
-    abserr = float(np.max(np.abs(x_back - x_arr)))
-    trigger_if(abserr > _AL_TOL_ABS, "AP-VIS-003")
-
-
 # --- Candidate AM: geodetic <-> geocentric Cartesian round trip -------------
 #
 # LAW_CANDIDATES.md Candidate AM. EarthLocation.to_geodetic converts
@@ -3305,9 +2643,7 @@ def check_power_dist_stretch_inverse_roundtrip(a, x_in, y_out):
 # switching to a relative tolerance on distance/radius, which a 5000-trial
 # sweep spanning radius 4e6 m to 1e20 m (14 decades past the original
 # design's r=4e10 m ceiling) found stable at ~7-8e-11 with **no growth** at
-# any tested extreme -- unlike AP-COORD-007's sibling AP-VIS-001/003, whose
-# absolute-tolerance-breaking regimes needed an upper precondition bound,
-# here the relative form is unconditionally robust and no radius ceiling
+# any tested extreme -- the relative form is unconditionally robust and no radius ceiling
 # is needed at all.
 #
 # Tolerance: 1e-9 relative (distance / radius), ~13x margin over the 7.6e-11

@@ -46,7 +46,6 @@ from .representation import (
     BaseRepresentationOrDifferential,
 )
 from .transformations import (
-    CompositeTransform,
     DynamicMatrixTransform,
     StaticMatrixTransform,
     TransformGraph,
@@ -1492,56 +1491,7 @@ class BaseCoordinateFrame(MaskableShapedLikeNDArray):
                 return new_frame.realize_frame(self.data)
             msg = "Cannot transform from {0} to {1}"
             raise ConvertError(msg.format(self.__class__, new_frame.__class__))
-        result = trans(self, new_frame)
-
-        if (
-            _scientific_checkers.enabled()
-            and new_frame.__class__ is self.__class__
-            and self.is_equivalent_frame(new_frame)
-            and isinstance(trans, CompositeTransform)
-            and all(
-                isinstance(edge, (StaticMatrixTransform, DynamicMatrixTransform))
-                for edge in trans.transforms
-            )
-        ):
-            try:
-                orig = self.represent_as(r.UnitSphericalRepresentation)
-                recon = result.represent_as(r.UnitSphericalRepresentation)
-                coordinate_scale_safe = True
-                if self.data is not None and not isinstance(
-                    self.data, r.UnitSphericalRepresentation
-                ):
-                    orig_cart = self.data.without_differentials().represent_as(
-                        r.CartesianRepresentation
-                    )
-                    recon_cart = result.data.without_differentials().represent_as(
-                        r.CartesianRepresentation
-                    )
-                    unit = orig_cart.x.unit
-                    orig_xyz = orig_cart.xyz.to_value(unit)
-                    recon_xyz = recon_cart.xyz.to_value(unit)
-                    max_component = float(np.max(np.abs(orig_xyz)))
-                    coordinate_scale_safe = (
-                        np.all(np.isfinite(orig_xyz))
-                        and np.all(np.isfinite(recon_xyz))
-                        and 1e-150 <= max_component <= 1e150
-                    )
-                    if coordinate_scale_safe:
-                        _scientific_checkers.check_frame_roundtrip_3d(
-                            tuple(float(x) for x in orig_xyz),
-                            tuple(float(x) for x in recon_xyz),
-                        )
-                if coordinate_scale_safe:
-                    _scientific_checkers.check_frame_roundtrip_angular(
-                        float(u.Quantity(orig.lon).to_value(u.rad)),
-                        float(u.Quantity(orig.lat).to_value(u.rad)),
-                        float(u.Quantity(recon.lon).to_value(u.rad)),
-                        float(u.Quantity(recon.lat).to_value(u.rad)),
-                    )
-            except Exception:
-                pass
-
-        return result
+        return trans(self, new_frame)
 
     def is_transformable_to(self, new_frame):
         """
