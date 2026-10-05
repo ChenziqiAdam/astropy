@@ -136,7 +136,7 @@
       "symbol": "FLRW.inv_efunc"
     },
     {
-      "alarm": "abs((age(0) - age(z)) - lookback_time(z)) exceeds 3 * 1.49e-8 * max(hubble_time, age(0), age(z)) (in the same unit, e.g. Gyr)",
+      "alarm": "abs((age(0) - age(z)) - lookback_time(z)) exceeds 3 * 1.49e-8 * max(hubble_time, age(0), age(z)) * max(1, peak of 1/((1+z)E) sampled on [0, max(z, 20)]) (in the same unit, e.g. Gyr)",
       "family": "age_lookback_time_complementarity",
       "id": "AP-COSMO-002",
       "invariant": "age(0) - age(z) = lookback_time(z), a consequence of integrating the same integrand (_lookback_time_integrand_scalar) over complementary bounds via scipy.integrate.quad",

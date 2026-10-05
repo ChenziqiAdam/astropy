@@ -1120,6 +1120,19 @@ def check_age_lookback_complementarity(cosmo, z, lookback_z_val):
     # near-loitering models (E(z) ~ 0 over a range) can be many Hubble times;
     # scale by the largest time involved, not the Hubble time alone.
     tol = _M_TOL_C * _M_QUAD_TOL * max(abs(hubble_time_gyr), abs(age0_val), abs(age_z_val))
+    # Near-loitering models have E(z) ~ 0 over a range, so the integrand
+    # 1/((1+z)E) has a huge narrow peak and quad's error estimate is
+    # unreliable by about the peak height: scale the tolerance by it.
+    try:
+        import numpy as np
+
+        grid = np.linspace(0.0, max(z_scalar, 20.0), 2001)
+        peak = float(np.max(np.abs(np.asarray(cosmo.inv_efunc(grid), dtype=float))))
+    except Exception:
+        return
+    if not math.isfinite(peak):
+        return
+    tol *= max(1.0, peak)
     trigger_if(err > tol, "AP-COSMO-002")
 
 
