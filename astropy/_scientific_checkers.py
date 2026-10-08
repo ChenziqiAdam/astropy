@@ -1915,7 +1915,7 @@ def _check_mass_from_gm(abbrev, value, mod):
     trigger_if(relerr > _Y_TOL, "AP-CONST-004")
 
 
-_CGS_CHARGE_ABBREVS = {"e_esu", "e_emu", "e_gauss"}
+_CGS_CHARGE_SYSTEMS = {"esu", "emu", "gauss"}
 _GM_MASS_ABBREVS = {"M_sun", "M_jup", "M_earth"}
 
 # --- Candidate AH: Bohr magneton cross-constant relation --------------------
@@ -1997,23 +1997,30 @@ def check_constant_relation(abbrev, system, value, uncertainty, caller_globals):
     # no astropy vintage module ever defines sigma_sb=1.0. Require the
     # caller to actually be one of astropy's own codata modules.
     mod_name = mod.get("__name__", "")
-    if not (
-        isinstance(mod_name, str)
-        and mod_name.startswith("astropy.constants.codata")
-    ):
+    if not isinstance(mod_name, str):
+        return
+    # CODATA relations live in codata modules; the M = GM/G relation lives in
+    # the IAU astro-constant modules (iau2015 defines M_sun/M_jup/M_earth).
+    in_codata = mod_name.startswith("astropy.constants.codata")
+    in_iau = mod_name.startswith("astropy.constants.iau")
+    if not (in_codata or in_iau):
         return
 
+    if in_iau:
+        if abbrev in _GM_MASS_ABBREVS:
+            _check_mass_from_gm(abbrev, value, mod)
+        return
     if abbrev == "sigma_sb" and system == "si":
         if "h" in mod and "k_B" in mod and "c" in mod:
             _check_sigma_sb(value, uncertainty, mod)
     elif abbrev == "R" and system == "si":
         if "N_A" in mod and "k_B" in mod:
             _check_gas_constant(value, uncertainty, mod)
-    elif abbrev in _CGS_CHARGE_ABBREVS:
+    elif abbrev == "e" and system in _CGS_CHARGE_SYSTEMS:
+        # e_esu / e_emu / e_gauss are constructed with e's own abbrev; the
+        # system tag identifies them
         if "e" in mod and "c" in mod:
             _check_cgs_charge(abbrev, system, value, mod)
-    elif abbrev in _GM_MASS_ABBREVS:
-        _check_mass_from_gm(abbrev, value, mod)
     elif abbrev == "muB" and system == "si":
         _check_bohr_magneton(value, mod)
 
