@@ -376,6 +376,31 @@ def _wcs_world_resolution_px(wcs_obj, world):
         return 0.0
 
 
+def _wcs_is_periodic_alias(wcs_obj, forward, recon, world, tol_px):
+    """True when ``recon`` is a different pixel that the forward transform maps
+    onto the same world point modulo one full turn of the celestial longitude.
+    Longitude is periodic, so pixel -> sky is not injective beyond one turn
+    (e.g. a cylindrical projection at pixel 370 and pixel 10 give the same
+    sky position) and the inverse legitimately returns the principal
+    representative; the recovered pixel is then a valid preimage."""
+    import numpy as np
+
+    try:
+        lng = int(wcs_obj.wcs.lng)
+        if lng < 0:
+            return False
+        scale = np.asarray(wcs_obj.pixel_scale_matrix, dtype=float)
+        rate = np.sqrt(np.sum(scale**2, axis=1))
+        back = np.atleast_2d(np.asarray(forward(recon), dtype=float))
+        ref = np.atleast_2d(np.asarray(world, dtype=float))
+        dw = back - ref
+        dw[:, lng] = (dw[:, lng] + 180.0) % 360.0 - 180.0
+        ok = rate > 0
+        return bool(np.all(np.abs(dw[:, ok]) / rate[ok] <= tol_px))
+    except Exception:
+        return False
+
+
 @_guard("wcs_projection_roundtrip")
 def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     """AP-WCS-001: wcs_pix2world and wcs_world2pix are documented as mutual
@@ -459,6 +484,10 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
     tol_px = max(_F_TOL_PX * max(1.0, pix_scale), _wcs_angular_floor_px(wcs_obj))
     tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    if err > tol_px and _wcs_is_periodic_alias(
+        wcs_obj, lambda p: wcs_obj.wcs_pix2world(p, origin), recon, world, tol_px
+    ):
+        return
     trigger_if(err > tol_px, "AP-WCS-001")
 
 
@@ -522,6 +551,10 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     )))
     tol_px = max(_G_TOL_C * default_tolerance, _wcs_angular_floor_px(wcs_obj))
     tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    if err > tol_px and _wcs_is_periodic_alias(
+        wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px
+    ):
+        return
     trigger_if(err > tol_px, "AP-WCS-002")
 
 
@@ -1757,6 +1790,10 @@ def check_convolution_cross_implementation(
 
     diff = np.max(np.abs(res[finite_mask] - fft_res[finite_mask]))
     scale = max(1.0, float(np.max(np.abs(arr[np.isfinite(arr)]), initial=0.0)))
+    if boundary == "fill" and np.isfinite(fill_value):
+        # The padding value enters the FFT as data, so FFT rounding scales
+        # with the largest magnitude present, fill value included.
+        scale = max(scale, abs(float(fill_value)))
     if not np.all(np.isfinite(arr)):
         # NaN interpolation divides the FFT output by the kernel weight that
         # falls on valid neighbours, so FFT rounding is amplified by
