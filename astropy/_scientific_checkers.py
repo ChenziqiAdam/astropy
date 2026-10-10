@@ -310,24 +310,54 @@ def _wcs_sip_contraction(wcs_obj, pix, origin):
     step / (1 - rho); the law 'error <= C * tolerance' needs rho well below 1."""
     import numpy as np
 
-    if getattr(wcs_obj, "sip", None) is None:
+    if all(
+        getattr(wcs_obj, a, None) is None
+        for a in ("sip", "cpdis1", "cpdis2", "det2im1", "det2im2")
+    ):
         return 0.0
     try:
         pix = np.atleast_2d(np.asarray(pix, dtype=float))
-        h = 1.0
+        h = 1e-2  # finer than lookup-table cells
         rho = 0.0
         jac = np.zeros((len(pix), 2, 2))
         for j in range(2):
             d = np.zeros(2)
             d[j] = h
             jac[:, :, j] = (
-                wcs_obj.sip_pix2foc(pix + d, origin) - wcs_obj.sip_pix2foc(pix - d, origin)
+                wcs_obj.pix2foc(pix + d, origin) - wcs_obj.pix2foc(pix - d, origin)
             ) / (2 * h)
         for jm in jac:
             rho = max(rho, float(np.linalg.norm(np.eye(2) - jm, 2)))
         return rho
     except Exception:
         return 0.0
+
+
+_F_COND_C = 10.0
+
+
+def _wcs_linear_conditioning_px(wcs_obj, original_xy):
+    """Forward-error floor of inverting the linear (PC/CD) step: a backward-
+    stable solve with condition number k recovers the pixel offset from the
+    rounded world coordinate only to ~k * eps * |offset|. The per-axis CDELT
+    scaling is exact and excluded; only the PC/CD mixing counts."""
+    import numpy as np
+
+    try:
+        try:
+            m = np.asarray(wcs_obj.wcs.get_pc(), dtype=float)
+        except Exception:
+            m = np.asarray(wcs_obj.pixel_scale_matrix, dtype=float)
+        k = float(np.linalg.cond(m))
+        crpix = np.asarray(wcs_obj.wcs.crpix, dtype=float)
+        off = float(
+            np.max(np.abs(np.asarray(original_xy, dtype=float) - crpix), initial=1.0)
+        )
+    except Exception:
+        return 0.0
+    if not np.isfinite(k):
+        return 0.0
+    return _F_COND_C * k * _EPS64 * max(1.0, off)
 
 
 def _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=True):
@@ -484,6 +514,7 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
     tol_px = max(_F_TOL_PX * max(1.0, pix_scale), _wcs_angular_floor_px(wcs_obj))
     tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    tol_px += _wcs_linear_conditioning_px(wcs_obj, original_xy)
     if err > tol_px and _wcs_is_periodic_alias(
         wcs_obj, lambda p: wcs_obj.wcs_pix2world(p, origin), recon, world, tol_px
     ):
@@ -551,6 +582,7 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     )))
     tol_px = max(_G_TOL_C * default_tolerance, _wcs_angular_floor_px(wcs_obj))
     tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    tol_px += _wcs_linear_conditioning_px(wcs_obj, original_xy)
     if err > tol_px and _wcs_is_periodic_alias(
         wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px
     ):
