@@ -216,6 +216,21 @@ def check_time_arithmetic_inverse(t1, t2, delta):
     if max(abs(float(t1.jd)), abs(float(t2.jd))) > _TIME_MAX_ABS_JD:
         return
 
+    # Time.__add__ deliberately drops a per-object delta_ut1_utc (it is
+    # invalidated by changing the time) and re-interpolates the IERS table,
+    # so T1 + (T2 - T1) == T2 holds only when every UT1-UTC attached to an
+    # operand is the table's own value: user-supplied values that disagree
+    # with the table make UT1<->UTC a non-single-valued mapping.
+    for t in (t1, t2):
+        if hasattr(t, "_delta_ut1_utc"):
+            try:
+                r = t.replicate()
+                del r._delta_ut1_utc
+                if abs(float(r.utc.delta_ut1_utc) - float(t._delta_ut1_utc)) > 1e-12:
+                    return
+            except Exception:
+                return
+
     year_min, year_max = _leap_table_year_range()
     if t1.scale == "utc" and not (year_min <= float(t1.decimalyear) <= year_max):
         return
@@ -393,7 +408,8 @@ def _wcs_world_resolution_px(wcs_obj, world):
     import numpy as np
 
     try:
-        scale = np.abs(np.asarray(wcs_obj.pixel_scale_matrix, dtype=float))
+        m = np.asarray(wcs_obj.pixel_scale_matrix, dtype=float)
+        scale = np.abs(m)
         rate = np.sqrt(np.sum(scale**2, axis=1))
         crval = np.abs(np.asarray(wcs_obj.wcs.crval, dtype=float))
         mag = np.max(np.abs(np.atleast_2d(np.asarray(world, dtype=float))), axis=0)
@@ -401,7 +417,14 @@ def _wcs_world_resolution_px(wcs_obj, world):
         ok = rate > 0
         if not np.any(ok):
             return 0.0
-        return float(np.max(ulp[ok] / rate[ok]))
+        diag = float(np.max(ulp[ok] / rate[ok]))
+        # A world rounding of ulp maps back to pixels through M^-1, so a
+        # sheared PC/CD amplifies it by up to |M^-1| (not 1/row-norm).
+        try:
+            amp = float(np.linalg.norm(np.abs(np.linalg.inv(m)) @ ulp))
+        except Exception:
+            amp = 0.0
+        return max(diag, amp if np.isfinite(amp) else 0.0)
     except Exception:
         return 0.0
 
@@ -1740,7 +1763,9 @@ def check_convolution_cross_implementation(
         # The padding value enters the FFT as data, so FFT rounding scales
         # with the largest magnitude present, fill value included.
         scale = max(scale, abs(float(fill_value)))
-    if not np.all(np.isfinite(arr)):
+    if not np.all(np.isfinite(arr)) or (
+        boundary == "fill" and not np.isfinite(fill_value)
+    ):
         # NaN interpolation divides the FFT output by the kernel weight that
         # falls on valid neighbours, so FFT rounding is amplified by
         # 1/weight. Weights below sqrt(eps) are the documented ``min_wt``
@@ -2605,7 +2630,11 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
     except Exception:
         return
 
-    x_arr, y_arr = np.asarray(x), np.asarray(y)
+    # evaluate() stacks (x, y) first, which converts Quantity components to
+    # one common unit; x_back/y_back are in that unit, so compare against the
+    # same stacked input rather than the raw per-component values.
+    x_ref, y_ref = np.moveaxis(np.stack(np.atleast_1d(x, y), axis=-2), -2, 0)
+    x_arr, y_arr = np.asarray(x_ref), np.asarray(y_ref)
     xb_arr, yb_arr = np.asarray(x_back), np.asarray(y_back)
     if not (
         np.all(np.isfinite(xb_arr)) and np.all(np.isfinite(yb_arr))

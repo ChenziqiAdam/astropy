@@ -33,14 +33,14 @@
       "id": "AP-TIME-002",
       "invariant": "Time.__sub__ and Time.__add__ form an additive group action: T1 + (T2 - T1) must equal T2 for any two valid epochs",
       "observation_point": "inside Time.__sub__, in the T-T branch, immediately after the resulting TimeDelta is finalized, before it is returned",
-      "precondition": "T1, T2 both scalar, unmasked Time instances with |JD| <= 1e8; same leap-second-table validity restriction when either is UTC-involving. The JD bound keeps fixed-epoch rate conversions inside the 50-ps float64 error model. Both operands must have no observer location or the same location (TDB-TT depends on location by up to ~2 us).",
+      "precondition": "T1, T2 both scalar, unmasked Time instances with |JD| <= 1e8; same leap-second-table validity restriction when either is UTC-involving. The JD bound keeps fixed-epoch rate conversions inside the 50-ps float64 error model. Both operands must have no observer location or the same location (TDB-TT depends on location by up to ~2 us). Any UT1-UTC value attached to an operand (Time.delta_ut1_utc set by the user) must equal the active IERS table value to 1e-12 s, because Time.__add__ re-interpolates the table and a user value that contradicts it makes UT1<->UTC non-single-valued.",
       "rationale": "light-curve folding, orbit propagation, and any time-grid construction via repeated TimeDelta addition relies on this exact inverse relationship",
       "scientific_quantity": "elapsed duration between two epochs, and the epoch reached by advancing from a given epoch by a given duration",
       "source": "astropy/time/core.py",
       "symbol": "Time.__sub__"
     },
     {
-      "alarm": "Euclidean pixel distance between the original pixel and wcs_world2pix(world) exceeds max(1e-6 pixels * max(1, max|pixel|), 3e-10 deg / plate scale) + world-resolution term, where the term is max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel| (float64 spacing of the world coordinate expressed in pixels; ~1e-14 px for celestial axes, 0.06 px for a 3e14 Hz axis at cdelt 1 Hz) + 10 * cond(PC) * eps64 * max(1, max|pixel - CRPIX|)",
+      "alarm": "Euclidean pixel distance between the original pixel and wcs_world2pix(world) exceeds max(1e-6 pixels * max(1, max|pixel|), 3e-10 deg / plate scale) + world-resolution term, where the term is the larger of (a) max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel| and (b) the norm of |M^-1| times the per-axis ulp vector, M being the pixel-scale matrix (float64 spacing of the world coordinate expressed in pixels, propagated back through the inverse linear map so sheared PC/CD matrices are covered; ~1e-14 px for celestial axes, 0.06 px for a 3e14 Hz axis at cdelt 1 Hz) + 10 * cond(PC) * eps64 * max(1, max|pixel - CRPIX|)",
       "family": "wcs_projection_roundtrip",
       "id": "AP-WCS-001",
       "invariant": "wcs_pix2world and wcs_world2pix are documented as mutual inverses on the core projection",
@@ -52,7 +52,7 @@
       "symbol": "WCS.wcs_pix2world"
     },
     {
-      "alarm": "pixel_distance(original, all_world2pix_result) exceeds max(10 * the explicit 1e-4 tolerance used by the checker re-call, 3e-10 deg / plate scale) + the same world-resolution and linear-conditioning terms as AP-WCS-001 (world-resolution: max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel|)",
+      "alarm": "pixel_distance(original, all_world2pix_result) exceeds max(10 * the explicit 1e-4 tolerance used by the checker re-call, 3e-10 deg / plate scale) + the same world-resolution and linear-conditioning terms as AP-WCS-001 (world-resolution: the larger of max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel| and the norm of |M^-1| times the per-axis ulp vector, M the pixel-scale matrix)",
       "family": "wcs_iterative_inverse_accuracy",
       "id": "AP-WCS-002",
       "invariant": "when the checker re-calls all_world2pix at its default tolerance and it returns without raising NoConvergence, the pixel distance to the true originating pixel must not exceed that default tolerance by more than a small, derived safety margin",
@@ -189,7 +189,7 @@
       "id": "AP-CONV-003",
       "invariant": "convolve(array, kernel, ...) and convolve_fft(array, kernel, ...) agree elementwise to float64 rounding",
       "observation_point": "end of convolve(), additionally calling convolve_fft() with matching forwarded arguments and comparing",
-      "precondition": "finite input/kernel, boundary in {fill, wrap}, normalize_kernel=True, kernel not larger than the array, input size <=4096, nonzero kernel sum, and kernel L1/sum condition <= eps64^-1/2 When the array contains NaN (interpolation), the kernel must be non-negative: renormalizing by partial sums of a signed kernel is unbounded ill-conditioned. When the array contains NaN, the smallest fraction of the kernel falling on valid pixels must be at least sqrt(eps64) (below that is the documented min_wt regime); the tolerance is divided by that fraction. The padding value enters the FFT as data, so the tolerance scale includes the finite fill value.",
+      "precondition": "finite input/kernel, boundary in {fill, wrap}, normalize_kernel=True, kernel not larger than the array, input size <=4096, nonzero kernel sum, and kernel L1/sum condition <= eps64^-1/2 When the array contains NaN (interpolation), the kernel must be non-negative: renormalizing by partial sums of a signed kernel is unbounded ill-conditioned. When the array contains NaN, or boundary='fill' with a non-finite fill value (missing boundary), the smallest fraction of the kernel falling on valid pixels (padding counted as missing for a non-finite fill value) must be at least sqrt(eps64) (below that is the documented min_wt regime); the tolerance is divided by that fraction. The padding value enters the FFT as data, so the tolerance scale includes the finite fill value.",
       "rationale": "convolve and convolve_fft are astropy's two primary user-facing convolution entry points, documented as interchangeable modulo performance and independently implemented (compiled C vs NumPy FFT); disagreement beyond rounding means at least one has a correctness bug no single-function round-trip check in this bank could otherwise detect",
       "scientific_quantity": "the discrete convolution of an array with a kernel, computed two structurally unrelated ways (direct C summation vs FFT-domain multiplication)",
       "source": "astropy/convolution/convolve.py",
@@ -328,12 +328,12 @@
       "symbol": "muB"
     },
     {
-      "alarm": "max component-wise absolute error after the round trip, relative to max(|x|,|y|), exceeds 30*eps64",
+      "alarm": "max component-wise absolute error after the round trip, relative to max(|x|,|y|), exceeds 30*eps64 (both sides expressed in that common unit)",
       "family": "rotation2d_inverse_roundtrip",
       "id": "AP-MODEL-002",
       "invariant": "rotating (x, y) by angle then by -angle returns to (x, y)",
       "observation_point": "inside Rotation2D.evaluate, immediately after computing the forward-rotated (x, y), before returning it",
-      "precondition": "finite angle, finite (x, y) -- no degenerate cases, a 2D rotation matrix is invertible for every angle",
+      "precondition": "finite angle, finite (x, y) -- no degenerate cases, a 2D rotation matrix is invertible for every angle. When x and y are Quantities in different units, the comparison is made in the single common unit in which evaluate() stacks them.",
       "rationale": "Rotation2D.inverse constructs a fresh model with angle=-self.angle, and evaluate() independently recomputes cos(-angle)/sin(-angle) via _compute_matrix rather than merely negating the forward matrix, so this is a genuine two-computation round trip; Rotation2D is used throughout astropy.modeling's compound-model machinery including WCS/gwcs pipelines",
       "scientific_quantity": "a 2D point rotated by an angle and then by the negated angle -- the modeling-framework analog of a frame-transform matrix round trip",
       "source": "astropy/modeling/rotations.py",
