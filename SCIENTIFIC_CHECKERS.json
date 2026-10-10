@@ -40,7 +40,7 @@
       "symbol": "Time.__sub__"
     },
     {
-      "alarm": "Euclidean pixel distance between the original pixel and wcs_world2pix(world) exceeds max(1e-6 pixels * max(1, max|pixel|), 3e-10 deg / plate scale)",
+      "alarm": "Euclidean pixel distance between the original pixel and wcs_world2pix(world) exceeds max(1e-6 pixels * max(1, max|pixel|), 3e-10 deg / plate scale) + world-resolution term, where the term is max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel| (float64 spacing of the world coordinate expressed in pixels; ~1e-14 px for celestial axes, 0.06 px for a 3e14 Hz axis at cdelt 1 Hz)",
       "family": "wcs_projection_roundtrip",
       "id": "AP-WCS-001",
       "invariant": "wcs_pix2world and wcs_world2pix are documented as mutual inverses on the core projection",
@@ -52,7 +52,7 @@
       "symbol": "WCS.wcs_pix2world"
     },
     {
-      "alarm": "pixel_distance(original, all_world2pix_result) exceeds max(10 * the explicit 1e-4 tolerance used by the checker re-call, 3e-10 deg / plate scale)",
+      "alarm": "pixel_distance(original, all_world2pix_result) exceeds max(10 * the explicit 1e-4 tolerance used by the checker re-call, 3e-10 deg / plate scale) + the same world-resolution term as AP-WCS-001 (max over world axes of ulp(max(|world|,|crval|)) / |d world / d pixel|)",
       "family": "wcs_iterative_inverse_accuracy",
       "id": "AP-WCS-002",
       "invariant": "when the checker re-calls all_world2pix at its default tolerance and it returns without raising NoConvergence, the pixel distance to the true originating pixel must not exceed that default tolerance by more than a small, derived safety margin",
@@ -177,7 +177,7 @@
       "id": "AP-STATS-004",
       "invariant": "bias == 0 exactly (the jackknife mean estimator is exactly unbiased) and std_err == sqrt(sum((x-xbar)**2)/(n*(n-1)))",
       "observation_point": "after jackknife_stats returns, checked only when the caller's statistic argument is np.mean by identity",
-      "precondition": "1-D finite float64 array with statistic=np.mean (identity check), max(|x|) <= 1e4 for the bias sub-check. Fixed 2026-09-15 (codex CLI black-box trial): added an explicit float64-only dtype gate -- a float32 input previously produced a float32-precision bias/std_err compared against this checker's float64-derived tolerance, guaranteeing a false trigger (numpy dtype-preservation, not an astropy defect).",
+      "precondition": "1-D finite float64 array (plain ndarray or MaskedArray) with statistic=np.mean (identity check), max(|x|) <= 1e4 for the bias sub-check. Fixed 2026-09-15 (codex CLI black-box trial): added an explicit float64-only dtype gate -- a float32 input previously produced a float32-precision bias/std_err compared against this checker's float64-derived tolerance, guaranteeing a false trigger (numpy dtype-preservation, not an astropy defect).",
       "rationale": "verifying jackknife_stats against the one case with a known closed form is a strong, non-tautological check on the shared resampling/bias-correction machinery (jackknife_resampling, the (n-1)*(mean_jack_stat-stat_data) bias formula, and the standard-error formula) that also silently affects every other statistic passed through the same code, but can only be caught where the correct value is independently known",
       "scientific_quantity": "jackknife bias and standard error for the specific, analytically tractable case of statistic=np.mean",
       "source": "astropy/stats/jackknife.py",

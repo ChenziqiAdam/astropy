@@ -353,6 +353,29 @@ def _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=True):
     return offset * scale * math.pi / 180.0 > _F_MAX_PLANE_RADIANS
 
 
+def _wcs_world_resolution_px(wcs_obj, world):
+    """Pixel-space float64 resolution of the world coordinates: along each
+    world axis the absolute value (|world| or |crval|, whichever is larger)
+    is stored with spacing ulp, so a pixel step of ulp / |d world / d pixel|
+    cannot be resolved however accurate the inverse is (a 3e14 Hz carrier
+    has ulp 0.0625 Hz, i.e. 0.06 px at cdelt 1 Hz). Worst round-trip error
+    observed is 0.5 of this bound; it is used as an additive tolerance term."""
+    import numpy as np
+
+    try:
+        scale = np.abs(np.asarray(wcs_obj.pixel_scale_matrix, dtype=float))
+        rate = np.sqrt(np.sum(scale**2, axis=1))
+        crval = np.abs(np.asarray(wcs_obj.wcs.crval, dtype=float))
+        mag = np.max(np.abs(np.atleast_2d(np.asarray(world, dtype=float))), axis=0)
+        ulp = np.spacing(np.maximum(mag, crval))
+        ok = rate > 0
+        if not np.any(ok):
+            return 0.0
+        return float(np.max(ulp[ok] / rate[ok]))
+    except Exception:
+        return 0.0
+
+
 @_guard("wcs_projection_roundtrip")
 def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     """AP-WCS-001: wcs_pix2world and wcs_world2pix are documented as mutual
@@ -435,6 +458,7 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
         return
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
     tol_px = max(_F_TOL_PX * max(1.0, pix_scale), _wcs_angular_floor_px(wcs_obj))
+    tol_px += _wcs_world_resolution_px(wcs_obj, world)
     trigger_if(err > tol_px, "AP-WCS-001")
 
 
@@ -497,6 +521,7 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
         np.asarray(recon_xy) - np.asarray(original_xy), axis=-1
     )))
     tol_px = max(_G_TOL_C * default_tolerance, _wcs_angular_floor_px(wcs_obj))
+    tol_px += _wcs_world_resolution_px(wcs_obj, world)
     trigger_if(err > tol_px, "AP-WCS-002")
 
 
