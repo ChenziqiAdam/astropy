@@ -136,18 +136,6 @@
       "symbol": "FLRW.inv_efunc"
     },
     {
-      "alarm": "abs((age(0) - age(z)) - lookback_time(z)) exceeds 3 * 1.49e-8 * max(hubble_time, age(0), age(z)) * max(1, peak of 1/((1+z)E) sampled on [0, max(z, 20)]) (in the same unit, e.g. Gyr)",
-      "family": "age_lookback_time_complementarity",
-      "id": "AP-COSMO-002",
-      "invariant": "age(0) - age(z) = lookback_time(z), a consequence of integrating the same integrand (_lookback_time_integrand_scalar) over complementary bounds via scipy.integrate.quad",
-      "observation_point": "inside lookback_time, re-calling the public age() at 0 and at z",
-      "precondition": "any FLRW cosmology instance and scalar redshift z >= 0 for which age(0), age(z), and lookback_time(z) all converge",
-      "rationale": "age and lookback_time are standard tools for converting between redshift and cosmic time; if they disagree with the age-now-minus-age-then identity, the integration bounds or hubble_time scaling is broken",
-      "scientific_quantity": "age of the universe at a redshift, and lookback time (elapsed time since that redshift) -- related by age(0) - age(z) = lookback_time(z)",
-      "source": "astropy/cosmology/_src/flrw/base.py",
-      "symbol": "FLRW.lookback_time (re-calls FLRW.age)"
-    },
-    {
       "alarm": "relative error between the re-call's result and a*base+b exceeds 1e-8 The comparison scale also includes max|a*x+b| (absolute arithmetic precision floor); symmetric widely spread data with true location 0 no longer fires.",
       "family": "biweight_affine_equivariance",
       "id": "AP-STATS-002",

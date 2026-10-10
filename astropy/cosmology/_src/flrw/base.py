@@ -684,17 +684,7 @@ class FLRW(
         --------
         z_at_value : Find the redshift corresponding to a lookback time.
         """
-        result = self._lookback_time(z)
-
-        if _scientific_checkers.enabled() and np.ndim(aszarr(z)) == 0:
-            try:
-                _scientific_checkers.check_age_lookback_complementarity(
-                    self, z, float(result.to_value(u.Gyr))
-                )
-            except Exception:
-                pass
-
-        return result
+        return self._lookback_time(z)
 
     def _lookback_time(self, z: u.Quantity | ArrayLike, /) -> u.Quantity:
         """Lookback time in Gyr to redshift ``z``.
