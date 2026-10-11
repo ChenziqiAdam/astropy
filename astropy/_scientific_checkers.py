@@ -311,6 +311,10 @@ def _wcs_world_at_pole(wcs_obj, world, pix=None, origin=0):
     try:
         if pix is None:
             return False
+        # p2s leaves "theta" uninitialised (np.empty) when the WCS has no
+        # celestial axis pair; reading it gates at random.
+        if int(wcs_obj.wcs.lng) < 0 or int(wcs_obj.wcs.lat) < 0:
+            return False
         native = wcs_obj.wcs.p2s(np.asarray(pix, dtype=float), origin)
         theta = np.asarray(native["theta"], dtype=float)
         return bool(np.nanmax(np.abs(theta)) > 90.0 - 1e-6)
@@ -389,6 +393,8 @@ def _wcs_outside_projection_domain(wcs_obj, original_xy, excluded_by_name=True):
         str(c).strip()[-3:] in _F_EXCLUDED_PROJECTIONS for c in ctype
     ):
         return True
+    if int(getattr(wcs_obj.wcs, "lng", -1)) < 0:
+        return False  # radians bound only meaningful for angular (celestial) axes
     try:
         scale = float(np.max(np.abs(np.asarray(wcs_obj.pixel_scale_matrix))))
         crpix = np.asarray(wcs_obj.wcs.crpix, dtype=float)
@@ -425,6 +431,48 @@ def _wcs_world_resolution_px(wcs_obj, world):
         except Exception:
             amp = 0.0
         return max(diag, amp if np.isfinite(amp) else 0.0)
+    except Exception:
+        return 0.0
+
+
+_F_LOCAL_RES_C = 2.0
+
+
+def _wcs_local_resolution_px(wcs_obj, original_xy, origin):
+    """World-resolution term through the LOCAL Jacobian of the core
+    transform at the actual pixels. Non-linear axes (e.g. VELO-F2V, WAVE-F2W,
+    -LOG) have d world / d pixel != CDELT away from CRPIX, so the linear-map
+    term understates the float64 resolution there. Returns +inf when one
+    pixel step changes some world coordinate by fewer than 4 ulp (the pixel
+    is not recoverable from the float64 world value -> outside the law)."""
+    import numpy as np
+
+    try:
+        p = np.atleast_2d(np.asarray(original_xy, dtype=float))
+        n = p.shape[1]
+        w0 = np.asarray(wcs_obj.wcs.p2s(p, origin)["world"], dtype=float)
+        crval = np.abs(np.asarray(wcs_obj.wcs.crval, dtype=float))
+        ulp = np.spacing(np.maximum(np.abs(w0), crval))
+        lng = int(getattr(wcs_obj.wcs, "lng", -1))
+        jac = np.zeros((len(p), n, n))
+        for j in range(n):
+            d = np.zeros(n)
+            d[j] = 1.0
+            dw = np.asarray(wcs_obj.wcs.p2s(p + d, origin)["world"], dtype=float) - np.asarray(
+                wcs_obj.wcs.p2s(p - d, origin)["world"], dtype=float
+            )
+            if lng >= 0:
+                dw[:, lng] = (dw[:, lng] + 180.0) % 360.0 - 180.0
+            jac[:, :, j] = dw / 2.0
+        term = 0.0
+        for jm, u in zip(jac, ulp):
+            if np.any(np.abs(jm).sum(axis=1) < 4.0 * u):
+                return float("inf")
+            t = float(np.linalg.norm(np.abs(np.linalg.inv(jm)) @ u))
+            if not np.isfinite(t):
+                return float("inf")
+            term = max(term, t)
+        return _F_LOCAL_RES_C * term
     except Exception:
         return 0.0
 
@@ -536,7 +584,10 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
         return
     err = float(np.max(np.linalg.norm(recon - original_xy, axis=-1)))
     tol_px = max(_F_TOL_PX * max(1.0, pix_scale), _wcs_angular_floor_px(wcs_obj))
-    tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    local_res = _wcs_local_resolution_px(wcs_obj, original_xy, origin)
+    if not np.isfinite(local_res):
+        return
+    tol_px += max(_wcs_world_resolution_px(wcs_obj, world), local_res)
     tol_px += _wcs_linear_conditioning_px(wcs_obj, original_xy)
     if err > tol_px and _wcs_is_periodic_alias(
         wcs_obj, lambda p: wcs_obj.wcs_pix2world(p, origin), recon, world, tol_px
@@ -604,7 +655,10 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
         np.asarray(recon_xy) - np.asarray(original_xy), axis=-1
     )))
     tol_px = max(_G_TOL_C * default_tolerance, _wcs_angular_floor_px(wcs_obj))
-    tol_px += _wcs_world_resolution_px(wcs_obj, world)
+    local_res = _wcs_local_resolution_px(wcs_obj, original_xy, origin)
+    if not np.isfinite(local_res):
+        return
+    tol_px += max(_wcs_world_resolution_px(wcs_obj, world), local_res)
     tol_px += _wcs_linear_conditioning_px(wcs_obj, original_xy)
     if err > tol_px and _wcs_is_periodic_alias(
         wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px
