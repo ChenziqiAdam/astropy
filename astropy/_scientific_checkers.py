@@ -502,6 +502,47 @@ def _wcs_is_periodic_alias(wcs_obj, forward, recon, world, tol_px):
         return False
 
 
+def _wcs_is_tab_preimage(wcs_obj, forward, recon, world, tol_px, origin):
+    """True when the WCS has a -TAB axis and ``recon`` is a valid preimage of
+    ``world``: forward(recon) reproduces world to within tol_px, measured in
+    pixels through the local Jacobian of the core transform at ``recon``.
+    A -TAB coordinate array need not be monotonic (only the index vectors
+    are checked by wcslib tabset), so pixel -> world can be many-to-one and
+    tabs2x legitimately returns the first matching table cell."""
+    import numpy as np
+
+    try:
+        ctype = [str(c).strip().upper() for c in wcs_obj.wcs.ctype]
+        if not any(c.endswith("-TAB") for c in ctype):
+            return False
+        rec = np.atleast_2d(np.asarray(recon, dtype=float))
+        dw = np.atleast_2d(np.asarray(forward(rec), dtype=float)) - np.atleast_2d(
+            np.asarray(world, dtype=float)
+        )
+        lng = int(getattr(wcs_obj.wcs, "lng", -1))
+        if lng >= 0:
+            dw[:, lng] = (dw[:, lng] + 180.0) % 360.0 - 180.0
+        n = rec.shape[1]
+        h = 1e-3
+        for k in range(len(rec)):
+            jm = np.zeros((n, n))
+            for j in range(n):
+                d = np.zeros(n)
+                d[j] = h
+                wp = np.asarray(wcs_obj.wcs.p2s(rec[k : k + 1] + d, origin)["world"], float)[0]
+                wm = np.asarray(wcs_obj.wcs.p2s(rec[k : k + 1] - d, origin)["world"], float)[0]
+                dd = wp - wm
+                if lng >= 0:
+                    dd[lng] = (dd[lng] + 180.0) % 360.0 - 180.0
+                jm[:, j] = dd / (2 * h)
+            res = float(np.linalg.norm(np.abs(np.linalg.inv(jm)) @ np.abs(dw[k])))
+            if not (np.isfinite(res) and res <= tol_px):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 @_guard("wcs_projection_roundtrip")
 def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
     """AP-WCS-001: wcs_pix2world and wcs_world2pix are documented as mutual
@@ -593,6 +634,10 @@ def check_wcs_pix2world_roundtrip(wcs_obj, original_xy, world, origin):
         wcs_obj, lambda p: wcs_obj.wcs_pix2world(p, origin), recon, world, tol_px
     ):
         return
+    if err > tol_px and _wcs_is_tab_preimage(
+        wcs_obj, lambda p: wcs_obj.wcs_pix2world(p, origin), recon, world, tol_px, origin
+    ):
+        return
     trigger_if(err > tol_px, "AP-WCS-001")
 
 
@@ -662,6 +707,10 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     tol_px += _wcs_linear_conditioning_px(wcs_obj, original_xy)
     if err > tol_px and _wcs_is_periodic_alias(
         wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px
+    ):
+        return
+    if err > tol_px and _wcs_is_tab_preimage(
+        wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px, origin
     ):
         return
     trigger_if(err > tol_px, "AP-WCS-002")
