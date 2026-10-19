@@ -851,18 +851,67 @@ def all_float64(*objs):
     return True
 
 
-def _doppler_rest_frequency_safe(rest_freq_hz):
-    """Whether squared frequency ratios stay in normal float64 range (and the
-    rest frequency is float64: float32 rounding is not a Doppler-law violation)."""
-    import math
-    import sys
+def narrow_eps(*objs, ops=1.0):
+    """Unified narrow-dtype policy (2026-10-20), shared by the checkers whose
+    hooks receive user-supplied numbers.
 
-    if not all_float64(rest_freq_hz):
+    Returns the unit round-off of the NARROWEST floating dtype among ``objs``
+    (arrays, Quantities or scalars; eps64 if none), so a float32/float16 input
+    is checked with a tolerance scaled to its own resolution rather than
+    skipped; or None when an integer input can wrap in the library's own
+    arithmetic: max|x| * ops exceeds np.iinfo of its dtype, ``ops`` being the
+    growth of the largest intermediate over max|x| (number of accumulated
+    terms, times the other factor of a product). Integer wrap-around is a dtype
+    fact, not a law violation, so callers skip on None. Integers that cannot
+    wrap are exact and leave eps64.
+    """
+    import numpy as np
+
+    eps = _EPS64
+    for obj in objs:
+        if obj is None:
+            continue
+        try:
+            arr = np.asarray(getattr(obj, "value", obj))
+        except Exception:
+            continue
+        if np.issubdtype(arr.dtype, np.inexact):
+            eps = max(eps, float(np.finfo(arr.dtype).eps))
+        elif np.issubdtype(arr.dtype, np.integer) and arr.size:
+            big = float(np.max(np.abs(arr.astype(np.float64))))
+            if big * max(float(ops), 1.0) > float(np.iinfo(arr.dtype).max):
+                return None
+    return eps
+
+
+def _finfo_of_eps(eps):
+    """np.finfo of the floating dtype whose unit round-off narrow_eps returned."""
+    import numpy as np
+
+    for dt in (np.float16, np.float32):
+        if eps >= float(np.finfo(dt).eps):
+            return np.finfo(dt)
+    return np.finfo(np.float64)
+
+
+def _doppler_rest_frequency_safe(rest_freq_hz):
+    """Whether squared frequency ratios stay in the normal range of the rest
+    frequency's own dtype (doppler_relativistic squares it in that dtype)."""
+    import math
+
+    # Narrow-dtype policy (2026-10-20): a float32/float16 rest frequency is no
+    # longer rejected here; each Doppler checker scales its tolerance with
+    # narrow_eps(rest_freq_hz). Integer wrap (None) is excluded, and the range
+    # test uses the rest frequency's dtype (float16 Hz values above 16 overflow
+    # when squared, which is a dtype fact).
+    eps = narrow_eps(rest_freq_hz)
+    if eps is None:
         return False
+    fi = _finfo_of_eps(eps)
 
     value = abs(float(rest_freq_hz))
-    lower = 16.0 * math.sqrt(sys.float_info.min)
-    upper = math.sqrt(sys.float_info.max) / 16.0
+    lower = 16.0 * math.sqrt(float(fi.tiny))
+    upper = math.sqrt(float(fi.max)) / 16.0
     return math.isfinite(value) and lower <= value <= upper
 
 
@@ -882,6 +931,7 @@ def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
     """
     if not _doppler_rest_frequency_safe(rest_freq_hz):
         return
+    eps = narrow_eps(rest_freq_hz)
 
     from astropy import units as u
     from astropy.units.equivalencies import doppler_relativistic
@@ -909,7 +959,11 @@ def check_doppler_convention_agreement(rest_freq_hz, to_func_radio_hz):
 
         observed_relerr = abs((v_radio - v_rel) / v_rel)
         predicted = 0.5 * abs(beta) - 0.5 * beta**2
-        trigger_if(abs(observed_relerr - predicted) > _I_TOL, "AP-UNITS-002")
+        # narrow rest frequency: both velocities are differences of O(1)
+        # frequency ratios formed in that dtype, absolute error ~eps*c each,
+        # i.e. ~eps/|beta| relative (0 extra for float64)
+        tol = _I_TOL + 10.0 * max(eps - _EPS64, 0.0) / abs(beta)
+        trigger_if(abs(observed_relerr - predicted) > tol, "AP-UNITS-002")
 
 
 # --- Candidate J: relativistic Doppler cross-consistency ------------------
@@ -944,6 +998,7 @@ def check_doppler_redshift_consistency(rest_freq_hz, to_vel_freq_func):
 
     if not _doppler_rest_frequency_safe(rest_freq_hz):
         return
+    eps = narrow_eps(rest_freq_hz)
 
     from astropy.units.equivalencies import doppler_redshift
 
@@ -964,7 +1019,10 @@ def check_doppler_redshift_consistency(rest_freq_hz, to_vel_freq_func):
         v_from_redshift = convert_z_to_rv(z)
 
         err_over_c = abs(v_from_relativistic - v_from_redshift) / _CKMS
-        trigger_if(err_over_c > _J_TOL, "AP-UNITS-003")
+        # narrow rest frequency: the frequency ratio is formed in that dtype,
+        # O(eps) relative to c (0 extra for float64)
+        tol = _J_TOL + 10.0 * max(eps - _EPS64, 0.0)
+        trigger_if(err_over_c > tol, "AP-UNITS-003")
 
 
 # --- Candidate K: brightness vs. thermodynamic temperature ----------------
@@ -1004,7 +1062,12 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
 
     from astropy.units.equivalencies import brightness_temperature, spectral
 
-    if not all_float64(frequency_q, t_cmb_q):
+    # Narrow-dtype policy (2026-10-20): float32/float16 inputs are checked at
+    # their own resolution (narrow_eps) instead of skipped: the tolerance gets
+    # 10 * (eps - eps64). (The Planck factor itself is evaluated against
+    # float64 constants, so the normal-range tests below stay float64.)
+    eps = narrow_eps(frequency_q, t_cmb_q)
+    if eps is None:
         return
     bright_equiv = brightness_temperature(frequency_q)
     convert_jysr_to_k_bright = None
@@ -1054,7 +1117,8 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
 
     ratio = t_bright_k / t_thermo_k
     predicted = -(x**2) / 12.0
-    trigger_if(abs((ratio - 1) - predicted) > _K_TOL, "AP-UNITS-004")
+    tol = _K_TOL + 10.0 * max(eps - _EPS64, 0.0)
+    trigger_if(abs((ratio - 1) - predicted) > tol, "AP-UNITS-004")
 
 
 # --- Candidate L: separability matrix soundness vs numerical Jacobian -----
@@ -1214,7 +1278,7 @@ _C_TOL = 10.0 * _EPS64
 
 
 @_guard("triangle_inequality")
-def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
+def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True, eps=_EPS64):
     """AP-COORD-004: great-circle separation is a metric, so for any three
     points A, B, C on the sphere: separation(A, C) <= separation(A, B) +
     separation(B, C). This must hold unconditionally; a violation means
@@ -1237,7 +1301,13 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
     # The 10*eps64 tolerance is float64-derived; float32 coordinates carry
     # float32 rounding (near-antipodal separations differ by ~1e-7), which is
     # not a metric violation. The hook reports the caller's dtype.
-    if not float64:
+    # Narrow-dtype policy (2026-10-20): ``eps`` (narrow_eps of the four
+    # coordinates) replaces the float64-only skip. sep_ac is then computed in
+    # that dtype while sep_ab/sep_bc are float64 re-calls; a 20,000-pair sweep
+    # (a quarter near-antipodal) found |sep_ac - float64 sep| <= 3.3 eps rad
+    # and violation <= 1.5 eps for float32/float16, so the tolerance gets
+    # 10 * pi * (eps - eps64) (unchanged for float64).
+    if eps is None or not float64:
         return
     lonB = (lonA + lonC) / 2.0 + math.pi / 2.0
     latB = max(-math.pi / 2.0, min(math.pi / 2.0, (latA + latC) / 2.0))
@@ -1246,7 +1316,7 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
     sep_bc = float(angular_separation(lonB, latB, lonC, latC))
 
     violation = sep_ac - (sep_ab + sep_bc)
-    trigger_if(violation > _C_TOL, "AP-COORD-004")
+    trigger_if(violation > _C_TOL + 10.0 * math.pi * max(eps - _EPS64, 0.0), "AP-COORD-004")
 
 
 # --- Candidate P: biweight_location affine equivariance ---------------------
@@ -1259,7 +1329,14 @@ def check_triangle_inequality(lonA, latA, lonC, latC, sep_ac, float64=True):
 _P_TOL = 1e-8
 
 
-@_guard("biweight_affine_equivariance")
+# Repair 2026-10-21: commit 1ae4c3420d inserted this helper between the
+# `@_guard` decorator and check_biweight_location_equivariance, so the guard
+# wrapped the helper (whose wrapper discards return values -> always None,
+# and inside a guarded checker returns None immediately via the re-entrancy
+# flag). The hooks always pass the M production used (median or caller's), so
+# both AP-STATS-002 and AP-STATS-003 returned early on every call. The helper
+# is now unguarded; the guard is back on the location checker (it re-calls
+# biweight_location, so it needs the re-entrancy flag).
 def _biweight_center(M):
     """Scalar value of the initial location ``M`` passed by a biweight hook,
     or None when it is absent or not a single finite number."""
@@ -1273,6 +1350,24 @@ def _biweight_center(M):
     return float(m.reshape(-1)[0])
 
 
+def _biweight_sample(arr, ignore_nan):
+    """The values a biweight production call actually uses: unmasked entries
+    of a MaskedArray, minus NaNs when ``ignore_nan``. Checker-side statistics
+    (median, MAD, spread, magnitude) must come from this sample: np.median /
+    np.std / np.max ignore masks and propagate NaN, which (found 2026-10-21,
+    first benign sweep after the _biweight_center repair) put the rejection
+    edge gate on the wrong centre and dropped the data magnitude from the
+    AP-STATS-002 scale."""
+    import numpy as np
+
+    vals = np.ma.compressed(arr) if np.ma.isMaskedArray(arr) else np.ravel(arr)
+    vals = np.asarray(vals, dtype=np.float64)
+    if ignore_nan:
+        vals = vals[~np.isnan(vals)]
+    return vals
+
+
+@_guard("biweight_affine_equivariance")
 def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=None):
     """AP-STATS-002: biweight_location(a*x + b) == a*biweight_location(x) + b
     for a > 0 (LAW_CANDIDATES.md Candidate P). ``data``/``c``/``axis``/
@@ -1305,12 +1400,15 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=No
     b = float(rng.uniform(-1e4, 1e4))
     transformed = a * arr + b
 
+    # M must be a NumPy scalar: with axis=None production calls M.squeeze(),
+    # which a Python float lacks (a latent AttributeError hidden by the
+    # helper bug above until 2026-10-21).
     other = biweight_location(
         transformed,
         c=c,
         axis=axis,
         ignore_nan=ignore_nan,
-        M=None if m_val is None else a * m_val + b,
+        M=None if m_val is None else np.float64(a * m_val + b),
     )
     try:
         other_val = float(other)
@@ -1323,7 +1421,10 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=No
     # a*x + b is rounded with absolute error ~eps*max|a*x + b|; when the true
     # location is near 0 for widely spread data, a purely relative comparison
     # against the (tiny) result is below the arithmetic's own precision floor.
-    data_mag = float(np.max(np.abs(transformed)))
+    sample = _biweight_sample(transformed, ignore_nan)
+    if sample.size == 0:
+        return
+    data_mag = float(np.max(np.abs(sample)))
     scale = max(abs(predicted), abs(other_val), 1.0, data_mag)
     relerr = abs(other_val - predicted) / scale
     trigger_if(relerr > _P_TOL, "AP-STATS-002")
@@ -1472,12 +1573,15 @@ def check_biweight_midvariance_equivariance(
     if not (np.isfinite(base) and base > 0):
         return
 
-    arr_std = float(np.std(arr))
+    sample = _biweight_sample(arr, ignore_nan)
+    if sample.size < 5:
+        return
+    arr_std = float(np.std(sample))
     if not (np.isfinite(arr_std) and arr_std > 0):
         return
 
-    arr_median = float(np.median(arr))
-    arr_mad = float(np.median(np.abs(arr - arr_median)))
+    arr_median = float(np.median(sample))
+    arr_mad = float(np.median(np.abs(sample - arr_median)))
     if not (np.isfinite(arr_mad) and arr_mad > 0):
         return
     # Production centres the residuals on M (the median unless the caller
@@ -1499,7 +1603,7 @@ def check_biweight_midvariance_equivariance(
     # A point exactly on the rejection edge |u| = 1 is counted or not by
     # rounding alone (the window is a step function), so n jumps by one under
     # a*x + b; the law applies away from the edge.
-    u_abs = np.abs(arr - centre) / (float(c) * arr_mad)
+    u_abs = np.abs(sample - centre) / (float(c) * arr_mad)
     if np.any(np.abs(u_abs - 1.0) < 1e-9):
         return
     # The estimator divides by [sum (1-u^2)(1-5u^2)]^2; when that sum nearly
@@ -1513,10 +1617,22 @@ def check_biweight_midvariance_equivariance(
 
     rng = np.random.default_rng(abs(hash((arr.size, round(base, 6)))) % (2**32))
     a = float(rng.choice([-1.0, 1.0])) * float(rng.uniform(2.0, 1e4))
-    b = float(rng.uniform(-1e4, 1e4))
+    # The re-call on a*x + b is itself a production call and needs the same
+    # conditioning as the original: |a*centre + b| / (|a| * min(c,1) * MAD)
+    # <= _Q_DATA_COND_MAX (2026-10-21). The std-based shift gate below misses
+    # outlier-inflated std (the same std-vs-MAD gap fixed for data_cond on
+    # 2026-09-15): a 234-point outlier sweep case with c=0.1175 had
+    # |b|/(|a| std) = 81 but |b|/(|a| min(c,1) MAD) = 2.65e6 and relerr
+    # 5.8e-9 (b=0: 3.9e-15; relerr grows smoothly with the MAD-based ratio).
+    # b is drawn within half that budget so small-MAD data stay covered.
+    b_max = min(1e4, 0.5 * _Q_DATA_COND_MAX * abs(a) * min(float(c), 1.0) * arr_mad)
+    b = float(rng.uniform(-1.0, 1.0)) * b_max
 
     data_spread = abs(a) * arr_std
     if abs(b) > _Q_SHIFT_RATIO_MAX * data_spread:
+        return
+    shifted_cond = abs(a * centre + b) / (abs(a) * min(float(c), 1.0) * arr_mad)
+    if shifted_cond > _Q_DATA_COND_MAX:
         return
 
     transformed = a * arr + b
@@ -1649,8 +1765,14 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
     # has no basis at float32 precision, so a float32 input is outside this
     # law's precondition, not a violation of it. Confirmed the checker fired
     # this way on a 7-point float32 sample (bias/scale 3.5e-8 vs. tol 1e-8).
-    if arr.dtype != np.float64:
+    # Narrow-dtype policy (2026-10-20): instead of skipping, the oracle is the
+    # float64 closed form on the exactly-cast data and the rounding terms use
+    # eps of the data's own dtype (narrow_eps; integer data is averaged in a
+    # float64 accumulator, so it is exact and keeps eps64).
+    eps = narrow_eps(arr)
+    if eps is None:
         return
+    arr = arr.astype(np.float64)
 
     try:
         bias_val = float(bias)
@@ -1668,7 +1790,7 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
         bias_scale = max(abs(xbar), 1.0)
         bias_tol = max(
             _R_BIAS_TOL,
-            _R_BIAS_TOL_C * _EPS64 * n * max(1.0, max_abs_x) / bias_scale,
+            _R_BIAS_TOL_C * eps * n * max(1.0, max_abs_x) / bias_scale,
         )
         trigger_if(abs(bias_val) / bias_scale > bias_tol, "AP-STATS-004")
 
@@ -1677,7 +1799,7 @@ def check_jackknife_mean_closed_form(data, statistic, bias, std_err):
         return
     se_relerr = abs(se_val - predicted_se) / predicted_se
     cond = abs(xbar) / predicted_se
-    tol_se = _R_SE_TOL_C * _EPS64 * n * max(1.0, cond)
+    tol_se = _R_SE_TOL_C * eps * n * max(1.0, cond)
     trigger_if(se_relerr > tol_se, "AP-STATS-004")
 
 
@@ -1886,8 +2008,14 @@ def check_convolution_cross_implementation(
     # neighbours. For a signed kernel those partial sums can be arbitrarily
     # close to zero even when the full kernel is well conditioned, so the two
     # implementations are amplified without bound; interpolation is defined
-    # for non-negative kernels.
-    if not np.all(np.isfinite(arr)) and np.any(ker < 0):
+    # for non-negative kernels. A NaN fill value at a 'fill' boundary is the
+    # same renormalization (the out-of-array neighbours are missing), so it
+    # gets the same exclusion (repair 2026-10-20: kernel [1, -1+r, 1] with
+    # fill_value=nan divides the edge pixel by r; FFT error grows as eps/r^2).
+    renormalized = not np.all(np.isfinite(arr)) or (
+        boundary == "fill" and not np.isfinite(fill_value)
+    )
+    if renormalized and np.any(ker < 0):
         return
 
     try:
@@ -1916,9 +2044,7 @@ def check_convolution_cross_implementation(
         # The padding value enters the FFT as data, so FFT rounding scales
         # with the largest magnitude present, fill value included.
         scale = max(scale, abs(float(fill_value)))
-    if not np.all(np.isfinite(arr)) or (
-        boundary == "fill" and not np.isfinite(fill_value)
-    ):
+    if renormalized:
         # NaN interpolation divides the FFT output by the kernel weight that
         # falls on valid neighbours, so FFT rounding is amplified by
         # 1/weight. Weights below sqrt(eps) are the documented ``min_wt``
@@ -2275,9 +2401,14 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
     # float64-derived (see the T-class note above) and has no basis to
     # judge a float16 round-trip. Reject before the float() cast below
     # erases the evidence.
-    fap_arr = np.asarray(fap)
-    z_arr = np.asarray(z)
-    if fap_arr.dtype != np.float64 or z_arr.dtype != np.float64:
+    # Narrow-dtype policy (2026-10-20): instead of skipping, a float32/float16
+    # fap is checked at its own resolution. inv_fap_single forms z in fap's
+    # dtype (fap**(2/Nk), log(fap)), so z carries about eps*(1 + |z|) absolute
+    # rounding; the round trip is judged against that error propagated
+    # through fap_single (central-difference slope, float64), on top of the
+    # float64 tolerance. Unchanged for float64 fap.
+    eps = narrow_eps(fap, z)
+    if eps is None:
         return
 
     try:
@@ -2296,7 +2427,7 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
     # z = 1 - fap**(2/(N-dK)) (standard form) saturates at exactly 1.0 once
     # fap**(2/(N-dK)) falls below float64 resolution (e.g. N=4, fap < 1e-6),
     # so the inverse cannot recover fap by ordinary rounding.
-    if fap_val ** (2.0 / (N - dK)) < 1e4 * _EPS64:
+    if fap_val ** (2.0 / (N - dK)) < 1e4 * eps:
         return
 
     try:
@@ -2306,7 +2437,20 @@ def check_fap_roundtrip(fap, z, N, normalization, dH, dK):
     if not math.isfinite(fap_roundtrip):
         return
 
-    trigger_if(abs(fap_roundtrip - fap_val) > _AB_TOL, "AP-TS-002")
+    tol = _AB_TOL
+    if eps > _EPS64:
+        dz = 4.0 * eps * (1.0 + abs(z_val))
+        try:
+            slope = abs(
+                float(fap_single(z_val + dz, N, normalization, dH=dH, dK=dK))
+                - float(fap_single(z_val - dz, N, normalization, dH=dH, dK=dK))
+            ) / 2.0
+        except Exception:
+            return
+        if not math.isfinite(slope):
+            return
+        tol += 4.0 * eps * abs(fap_val) + 2.0 * slope
+    trigger_if(abs(fap_roundtrip - fap_val) > tol, "AP-TS-002")
 
 
 # --- Candidate AC: uncertainty-representation cross-implementation agreement
@@ -2568,15 +2712,21 @@ def check_spherical_differential_coslat_roundtrip(
 
     if base is None:
         return
+    # Narrow-dtype policy (2026-10-20): float32/float16 components are checked
+    # at their own resolution (narrow_eps) instead of skipped; the multiply/
+    # divide by cos(lat) rounds at that eps, and the underflow exclusion uses
+    # that dtype's smallest normal.
     try:
-        if not all_float64(
+        eps = narrow_eps(
             self_differential.d_lon,
             self_differential.d_lat,
             self_differential.d_distance,
             base.lon,
             base.lat,
-        ):
+        )
+        if eps is None:
             return
+        fi = _finfo_of_eps(eps)
     except Exception:
         return
 
@@ -2585,7 +2735,7 @@ def check_spherical_differential_coslat_roundtrip(
             self_differential.d_lon.to_value(self_differential.d_lon.unit)
         )
         coslat_val = np.cos(base.lat.to_value(u.rad))
-        underflows = np.abs(d_lon_val * coslat_val) < _AE_MIN_NORMAL_FLOAT
+        underflows = np.abs(d_lon_val * coslat_val) < max(_AE_MIN_NORMAL_FLOAT, float(fi.tiny))
         if np.any(underflows & (d_lon_val != 0)):
             return
     except Exception:
@@ -2617,7 +2767,7 @@ def check_spherical_differential_coslat_roundtrip(
         return
 
     relerr = float(max(np.max(r_lon), np.max(r_lat), np.max(r_dist)))
-    trigger_if(relerr > _AE_TOL_EPS, "AP-COORD-006")
+    trigger_if(relerr > _AE_TOL_EPS * eps / _EPS64, "AP-COORD-006")
 
 
 # --- Candidate AF: cross-module MAD-to-std scale factor consistency --------
@@ -2716,6 +2866,7 @@ def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz)
     """
     if not _doppler_rest_frequency_safe(rest_freq_hz):
         return
+    eps = narrow_eps(rest_freq_hz)
 
     from astropy import units as u
     from astropy.units.equivalencies import doppler_relativistic
@@ -2743,7 +2894,9 @@ def check_doppler_optical_convention_agreement(rest_freq_hz, to_func_optical_hz)
 
         observed_relerr = (v_opt - v_rel) / v_rel
         predicted = 0.5 * abs(beta) + 0.5 * beta**2
-        trigger_if(abs(observed_relerr - predicted) > _AG_TOL, "AP-UNITS-006")
+        # narrow rest frequency: ~eps/|beta| relative rounding (see AP-UNITS-002)
+        tol = _AG_TOL + 10.0 * max(eps - _EPS64, 0.0) / abs(beta)
+        trigger_if(abs(observed_relerr - predicted) > tol, "AP-UNITS-006")
 
 
 # --- Candidate AI: 2D rotation model inverse round trip ---------------------
