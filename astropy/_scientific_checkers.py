@@ -516,12 +516,21 @@ def _wcs_is_tab_preimage(
     SIP / lookup-table / det2im distortion: those are not required to be
     injective either (a step in a cpdis table can fold two pixels onto one
     focal-plane point), and the contraction gate is only evaluated at the
-    original pixels, so it cannot see a fold elsewhere (round 11)."""
+    original pixels, so it cannot see a fold elsewhere (round 11).
+
+    Grism axes (-GRI / -GRA) are covered too (round 13): the grating
+    equation lambda = (sin(beta) + n sin(alpha)) / (G m) is non-monotonic in
+    the diffraction angle beta, which wcslib sweeps through beta_ref +
+    arctan(...) and so past 90 deg (a ray behind the grating plane) at
+    large pixel offsets. Wavelength then has two pixel preimages and
+    wcs_world2pix legitimately returns the beta < 90 deg one. Where the map
+    is injective (|beta| < 90 deg) a valid preimage is the original pixel,
+    so the exemption cannot hide a wrong inverse there."""
     import numpy as np
 
     try:
         ctype = [str(c).strip().upper() for c in wcs_obj.wcs.ctype]
-        if not any(c.endswith("-TAB") for c in ctype) and not (
+        if not any(c.endswith(("-TAB", "-GRI", "-GRA")) for c in ctype) and not (
             any_distortion
             and any(
                 getattr(wcs_obj, a, None) is not None
@@ -1367,6 +1376,55 @@ def _biweight_sample(arr, ignore_nan):
     return vals
 
 
+def _biweight_rounding_bound(sample, c, centre, mad, a, b, kind):
+    """First-order bound on |f(a*x+b) - (a-equivariant f(x))| caused only by
+    float64 rounding of the inputs to the two biweight calls (round 13).
+
+    Both estimators are smooth functions of u_i = (x_i - M) / (c * MAD) over
+    the window |u| < 1. Rounding x, M, a*x + b and the MAD perturbs each u_i
+    by du_i <= eps * (|x_i| + 2|M|) / (c * MAD) in the original call and by the
+    same expression on (a*x + b, a*M + b) / |a| in the re-call (the 2|M| term
+    also covers the MAD's own rounding, which rescales every u_i by <= 1).
+    Propagating du_i through the closed forms (derivatives below) gives the
+    worst-case (all signs aligned) first-order error. It is O(eps) for
+    ordinary data and becomes large only where the estimator itself is
+    ill-conditioned: every in-window point near the |u| = 1 edge (the
+    weights (1-u^2)^2 vanish there), or a large |M|/(c*MAD) combined with a
+    nearly cancelling denominator sum (AP-STATS-003). Returns the bound in
+    the re-call's units divided by a (location: absolute, in units of x;
+    midvariance: relative), or None if no point is in the window.
+    """
+    import numpy as np
+
+    u = (sample - centre) / (c * mad)
+    inside = np.abs(u) < 1.0
+    if not np.any(inside):
+        return None
+    u = u[inside]
+    xi = sample[inside]
+    k = np.abs(xi) + 2.0 * abs(centre)
+    k = k + (np.abs(a * xi + b) + 2.0 * abs(a * centre + b)) / abs(a)
+    du = _EPS64 * k / (c * mad)
+    one = 1.0 - u * u
+    if kind == "location":
+        # value - M = c*MAD * sum(u (1-u^2)^2) / sum((1-u^2)^2)
+        s1, s2 = float(np.sum(u * one**2)), float(np.sum(one**2))
+        if s2 <= 0.0:
+            return None
+        d1 = float(np.sum(np.abs(one * (1.0 - 5.0 * u * u)) * du))
+        d2 = float(np.sum(np.abs(4.0 * u * one) * du))
+        return c * mad * (d1 / s2 + abs(s1) / s2 * d2 / s2)
+    # midvariance ~ sum(u^2 (1-u^2)^4) / [sum((1-u^2)(1-5u^2))]^2 (times
+    # (c*MAD)^2 and n, which scale exactly under a*x + b)
+    s1 = float(np.sum(u * u * one**4))
+    s2 = float(np.sum(one * (1.0 - 5.0 * u * u)))
+    if s1 <= 0.0 or s2 == 0.0:
+        return None
+    d1 = float(np.sum(np.abs(2.0 * u * one**3 * (1.0 - 5.0 * u * u)) * du))
+    d2 = float(np.sum(np.abs(-12.0 * u + 20.0 * u**3) * du))
+    return d1 / s1 + 2.0 * d2 / abs(s2)
+
+
 @_guard("biweight_affine_equivariance")
 def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=None):
     """AP-STATS-002: biweight_location(a*x + b) == a*biweight_location(x) + b
@@ -1427,7 +1485,24 @@ def check_biweight_location_equivariance(data, c, axis, ignore_nan, result, M=No
     data_mag = float(np.max(np.abs(sample)))
     scale = max(abs(predicted), abs(other_val), 1.0, data_mag)
     relerr = abs(other_val - predicted) / scale
-    trigger_if(relerr > _P_TOL, "AP-STATS-002")
+    # Rejection-edge conditioning (round 13): with every in-window point at
+    # |u| = 1 - 2e-10 (c tuned to 0.5000000001 on a symmetric sample) the
+    # weights (1-u^2)^2 ~ 1e-19 carry relative rounding ~eps/(1-|u|), so the
+    # re-call legitimately differed by 9.5e-8 (> _P_TOL; exact production
+    # value 0.1 on x). The tolerance never drops below _P_TOL and grows only
+    # with the first-order rounding bound (x2 for second-order terms near
+    # the edge), which is ~1e-15 for ordinary data.
+    orig = _biweight_sample(arr, ignore_nan)
+    med = float(np.median(orig))
+    mad = float(np.median(np.abs(orig - med)))
+    tol = _P_TOL
+    if np.isfinite(c) and c > 0 and np.isfinite(mad) and mad > 0:
+        bound = _biweight_rounding_bound(
+            orig, float(c), med if m_val is None else m_val, mad, a, b, "location"
+        )
+        if bound is not None:
+            tol = max(tol, 2.0 * a * bound / scale)
+    trigger_if(relerr > tol, "AP-STATS-002")
 
 
 # --- Candidate Q: biweight_midvariance quadratic scale equivariance --------
@@ -1655,7 +1730,18 @@ def check_biweight_midvariance_equivariance(
     predicted = a * a * base
     scale = max(abs(predicted), abs(other_val), 1e-300)
     relerr = abs(other_val - predicted) / scale
-    trigger_if(relerr > _Q_TOL, "AP-STATS-003")
+    # Combined conditioning (round 13): data_cond = 482 (< 500) and the
+    # denominator cancellation ratio 3625 (< 1e4) each passed their gate, but
+    # their joint amplification of input rounding is not bounded by the
+    # fixed _Q_TOL (relerr 1.43e-9; exact rational arithmetic shows
+    # production correct to 1e-14 on both calls, the gap being fl(a*x)
+    # rounding). The tolerance grows with the first-order rounding bound
+    # (x2 for second-order terms), ~1e-14..1e-11 for ordinary data.
+    tol = _Q_TOL
+    bound = _biweight_rounding_bound(sample, float(c), centre, arr_mad, a, b, "midvariance")
+    if bound is not None:
+        tol = max(tol, 2.0 * bound)
+    trigger_if(relerr > tol, "AP-STATS-003")
 
 
 # --- Candidate R: jackknife closed form for the mean statistic -------------
@@ -2930,7 +3016,13 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
     import numpy as np
 
     try:
-        matrix_inv = cls._compute_matrix(-angle_rad)
+        # Negate in float64 (round 13): production's _compute_matrix feeds the
+        # angle to math.cos/sin, i.e. converts it to a Python float first, so
+        # an unsigned-integer angle is valid there, but negating it in its own
+        # dtype wrapped (-uint64(1) = 1.8e19 rad). float(x) is exact for every
+        # float dtype, so float angles are unchanged; 0-d stays a scalar.
+        neg = -np.asarray(angle_rad, dtype=np.float64)
+        matrix_inv = cls._compute_matrix(neg if neg.ndim else neg[()])
         inarr = np.stack(np.atleast_1d(x_rot, y_rot), axis=-2)
         x_back, y_back = np.moveaxis(np.matmul(matrix_inv, inarr), -2, 0)
     except Exception:
