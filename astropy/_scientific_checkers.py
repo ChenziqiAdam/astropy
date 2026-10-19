@@ -502,18 +502,32 @@ def _wcs_is_periodic_alias(wcs_obj, forward, recon, world, tol_px):
         return False
 
 
-def _wcs_is_tab_preimage(wcs_obj, forward, recon, world, tol_px, origin):
+def _wcs_is_tab_preimage(
+    wcs_obj, forward, recon, world, tol_px, origin, any_distortion=False
+):
     """True when the WCS has a -TAB axis and ``recon`` is a valid preimage of
     ``world``: forward(recon) reproduces world to within tol_px, measured in
     pixels through the local Jacobian of the core transform at ``recon``.
     A -TAB coordinate array need not be monotonic (only the index vectors
     are checked by wcslib tabset), so pixel -> world can be many-to-one and
-    tabs2x legitimately returns the first matching table cell."""
+    tabs2x legitimately returns the first matching table cell.
+
+    With ``any_distortion`` the same exemption also covers a WCS with a
+    SIP / lookup-table / det2im distortion: those are not required to be
+    injective either (a step in a cpdis table can fold two pixels onto one
+    focal-plane point), and the contraction gate is only evaluated at the
+    original pixels, so it cannot see a fold elsewhere (round 11)."""
     import numpy as np
 
     try:
         ctype = [str(c).strip().upper() for c in wcs_obj.wcs.ctype]
-        if not any(c.endswith("-TAB") for c in ctype):
+        if not any(c.endswith("-TAB") for c in ctype) and not (
+            any_distortion
+            and any(
+                getattr(wcs_obj, a, None) is not None
+                for a in ("sip", "cpdis1", "cpdis2", "det2im1", "det2im2")
+            )
+        ):
             return False
         rec = np.atleast_2d(np.asarray(recon, dtype=float))
         dw = np.atleast_2d(np.asarray(forward(rec), dtype=float)) - np.atleast_2d(
@@ -710,7 +724,13 @@ def check_wcs_all_world2pix_accuracy(wcs_obj, original_xy, world, origin):
     ):
         return
     if err > tol_px and _wcs_is_tab_preimage(
-        wcs_obj, lambda p: wcs_obj.all_pix2world(p, origin), recon_xy, world, tol_px, origin
+        wcs_obj,
+        lambda p: wcs_obj.all_pix2world(p, origin),
+        recon_xy,
+        world,
+        tol_px,
+        origin,
+        any_distortion=True,
     ):
         return
     trigger_if(err > tol_px, "AP-WCS-002")
@@ -980,6 +1000,8 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
     brightness (the ratio of recovered temperatures is independent of the
     test brightness value, since both formulas are linear in the input).
     """
+    import numpy as np
+
     from astropy.units.equivalencies import brightness_temperature, spectral
 
     if not all_float64(frequency_q, t_cmb_q):
@@ -1007,6 +1029,27 @@ def check_brightness_thermodynamic_consistency(frequency_q, t_cmb_q, convert_jy_
     # x**2 must stay a normal float64 (x < ~1e-154 underflows by ordinary
     # arithmetic, e.g. T_cmb ~ 1e150 K); 1e-100 leaves a wide margin.
     if not (1e-100 < x < _K_X_MAX):
+        return
+    # thermodynamic_temperature evaluates f(nu)*2*k_B*K*nu**2/c**2 as a
+    # Quantity with nu in GHz and x left in unreduced units, so the raw float
+    # carries an extra 1e-18 from f; the Jy rescale happens only at the end.
+    # Every factor of that raw product is < 1 once it gets this small, so its
+    # final raw value is the smallest intermediate. Below the float64 normal
+    # range it loses relative precision (nu=1e-122 Hz: 3e-320, residual
+    # 7.7e-5; nu=1e-110 Hz: 3e-296, residual 2.6e-16), so the same raw value
+    # must stay normal (round 11). Recomputed here with the production
+    # expression, which has no side effects.
+    from astropy import constants as _const
+    from astropy.units import K as _K_unit
+    from astropy.units import si as _si_units
+
+    nu_ghz = frequency_q.to(_si_units.GHz, spectral())
+    with np.errstate(all="ignore"):
+        xq = _const.h * nu_ghz / _const.k_B / t_cmb_q
+        fq = xq**2 * np.exp(xq) / np.expm1(xq) ** 2
+        raw = fq * 2 * _const.k_B * _K_unit * nu_ghz**2 / _const.c**2
+    raw = abs(float(raw.value))
+    if not raw >= np.finfo(np.float64).tiny:
         return
 
     ratio = t_bright_k / t_thermo_k
@@ -1733,7 +1776,14 @@ def check_convolution_flux_conservation(
     # every output pixel (e.g. a flat field), so the total-flux drift grows
     # linearly in N, not as sqrt(N): add a systematic term relative to the
     # total |flux| (1.5e-11 for a 256x256 field of ones is 1 ulp of 65536).
-    systematic = _T_TOL_C * _EPS64 * kernel_cond * float(np.sum(np.abs(arr)))
+    # Each output pixel is also a sequential sum of ker.size products (plus,
+    # for nan_treatment='interpolate', a sequential sum of the weights and a
+    # division), whose standard error bound is ~ker.size*eps per sum relative
+    # to sum|k*a|; on a flat field it is systematic too (a 5001-tap box gives
+    # 338 eps per pixel, 11x the old 30-eps term, round 11). Summed over
+    # pixels with periodic wrap, sum_i sum_j |k_j a_(i-j)| = |k|_1 sum|a|.
+    n_terms = max(_T_TOL_C, 2.0 * ker.size + 2.0)
+    systematic = n_terms * _EPS64 * kernel_cond * float(np.sum(np.abs(arr)))
     trigger_if(abs(after - before) > tol * scale + systematic, "AP-CONV-002")
 
 
@@ -2737,7 +2787,10 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
     # one common unit; x_back/y_back are in that unit, so compare against the
     # same stacked input rather than the raw per-component values.
     x_ref, y_ref = np.moveaxis(np.stack(np.atleast_1d(x, y), axis=-2), -2, 0)
-    x_arr, y_arr = np.asarray(x_ref), np.asarray(y_ref)
+    # Cast to float before np.abs: evaluate() accepts integer arrays, and
+    # np.abs(int64(-2**63)) overflows back to -2**63, which collapsed the
+    # norm below to its 1e-300 floor (round 11).
+    x_arr, y_arr = np.asarray(x_ref, dtype=float), np.asarray(y_ref, dtype=float)
     xb_arr, yb_arr = np.asarray(x_back), np.asarray(y_back)
     if not (
         np.all(np.isfinite(xb_arr)) and np.all(np.isfinite(yb_arr))
