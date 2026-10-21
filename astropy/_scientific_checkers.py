@@ -28,6 +28,7 @@ import threading
 _active = threading.local()
 
 _EPS64 = 2.220446049250313e-16  # np.finfo(np.float64).eps, derived once
+_ETA64 = 5e-324  # smallest float64 subnormal 2**-1074 (np.finfo(np.float64).smallest_subnormal)
 
 
 def enabled():
@@ -1404,8 +1405,14 @@ def _biweight_rounding_bound(sample, c, centre, mad, a, b, kind):
     xi = sample[inside]
     k = np.abs(xi) + 2.0 * abs(centre)
     k = k + (np.abs(a * xi + b) + 2.0 * abs(a * centre + b)) / abs(a)
-    du = _EPS64 * k / (c * mad)
+    # Gradual underflow (round 16): a float64 rounding is x(1+d) + e with
+    # |e| <= _ETA64 / 2 once the result is subnormal, so it adds an absolute
+    # floor to every rounded quantity (x, M, a*x + b, c*MAD; per unit of the
+    # re-call divided by |a| >= 2): <= 4 * _ETA64 / (c*MAD) on each u_i.
+    # Negligible unless the data are near 1e-300.
+    du = (_EPS64 * k + 4.0 * _ETA64) / (c * mad)
     one = 1.0 - u * u
+    n_in = float(u.size)
     if kind == "location":
         # value - M = c*MAD * sum(u (1-u^2)^2) / sum((1-u^2)^2)
         s1, s2 = float(np.sum(u * one**2)), float(np.sum(one**2))
@@ -1413,7 +1420,10 @@ def _biweight_rounding_bound(sample, c, centre, mad, a, b, kind):
             return None
         d1 = float(np.sum(np.abs(one * (1.0 - 5.0 * u * u)) * du))
         d2 = float(np.sum(np.abs(4.0 * u * one) * du))
-        return c * mad * (d1 / s2 + abs(s1) / s2 * d2 / s2)
+        # production's numerator terms d*(1-u^2)^2 underflow by <= _ETA64 each
+        # (one product; subnormal additions are exact), in both calls
+        uf = 2.0 * n_in * _ETA64 / s2
+        return c * mad * (d1 / s2 + abs(s1) / s2 * d2 / s2) + uf
     # midvariance ~ sum(u^2 (1-u^2)^4) / [sum((1-u^2)(1-5u^2))]^2 (times
     # (c*MAD)^2 and n, which scale exactly under a*x + b)
     s1 = float(np.sum(u * u * one**4))
@@ -1422,7 +1432,13 @@ def _biweight_rounding_bound(sample, c, centre, mad, a, b, kind):
         return None
     d1 = float(np.sum(np.abs(2.0 * u * one**3 * (1.0 - 5.0 * u * u)) * du))
     d2 = float(np.sum(np.abs(-12.0 * u + 20.0 * u**3) * du))
-    return d1 / s1 + 2.0 * d2 / abs(s2)
+    # Production's numerator f1 = sum(d*d*(1-u^2)^4) rounds two products per
+    # term; once they are subnormal (run 15: 1e-145 data at |u| = 1 - 1e-8, terms
+    # 1.6e-321) each loses up to _ETA64 absolutely, a relative error of
+    # n*_ETA64/f1 in the original call (a**2 times less in the re-call).
+    f1 = (c * mad) * (c * mad) * s1
+    uf = 2.0 * n_in * _ETA64 / f1 if f1 > 0.0 else float("inf")
+    return d1 / s1 + 2.0 * d2 / abs(s2) + uf
 
 
 @_guard("biweight_affine_equivariance")
