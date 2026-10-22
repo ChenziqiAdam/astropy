@@ -3051,7 +3051,12 @@ def check_rotation2d_inverse_roundtrip(cls, x, y, angle_rad, x_rot, y_rot):
     # Cast to float before np.abs: evaluate() accepts integer arrays, and
     # np.abs(int64(-2**63)) overflows back to -2**63, which collapsed the
     # norm below to its 1e-300 floor (round 11).
-    x_arr, y_arr = np.asarray(x_ref, dtype=float), np.asarray(y_ref, dtype=float)
+    # The cast must be to the inexact result type, not plain float: complex
+    # amplitudes (phasors, Fourier coefficients) are valid input and
+    # dtype=float discarded their imaginary part (round 20); np.abs is then
+    # the complex modulus. Real/integer input still casts to float64.
+    ref_dt = np.result_type(x_ref, y_ref, np.float64)
+    x_arr, y_arr = np.asarray(x_ref, dtype=ref_dt), np.asarray(y_ref, dtype=ref_dt)
     xb_arr, yb_arr = np.asarray(x_back), np.asarray(y_back)
     if not (
         np.all(np.isfinite(xb_arr)) and np.all(np.isfinite(yb_arr))
